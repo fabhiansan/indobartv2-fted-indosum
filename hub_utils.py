@@ -214,13 +214,13 @@ print(summary)
 ## Citation
 
 ```
-@misc{{indobart-indosum,
+@misc{indobart-indosum,
   author = {{IndoNLP Team}},
   title = {{IndoBART fine-tuned on IndoSUM}},
   year = {2025},
   publisher = {Hugging Face},
-  howpublished = {{\\url{{https://huggingface.co/{repo_id}}}}}
-}}
+  howpublished = {\\url{https://huggingface.co/" + repo_id + "}}
+}
 ```
 """
     
