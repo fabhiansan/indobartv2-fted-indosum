@@ -19,8 +19,19 @@ import torch
 from torch import optim
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
-from transformers import MBartForConditionalGeneration, get_linear_schedule_with_warmup
-from transformers.file_utils import is_torch_tpu_available
+from transformers import MBartForConditionalGeneration, get_linear_schedule_with_warmup, MBartTokenizer
+
+# Handle different transformers versions for TPU availability check
+try:
+    from transformers.utils.imports import is_torch_tpu_available
+except ImportError:
+    try:
+        from transformers.file_utils import is_torch_tpu_available
+    except ImportError:
+        # Fallback if neither import works
+        def is_torch_tpu_available():
+            return False
+
 from huggingface_hub import HfApi
 from datasets import load_from_disk, concatenate_datasets
 from torch.utils.data import DataLoader, Dataset
@@ -30,16 +41,19 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import IndoNLG utilities
 try:
-    from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
+    from transformers import MBartTokenizer, MBartForConditionalGeneration
     from indonlg.utils.metrics import generation_metrics_fn 
     from indonlg.utils.forward_fn import forward_generation
-    from indonlg.utils.data_utils import MachineTranslationDataset, GenerationDataLoader
 except ImportError:
     # Alternative path if above imports fail
-    from indobenchmark import IndoNLGTokenizer
-    from indonlg.utils.metrics import generation_metrics_fn
-    from indonlg.utils.forward_fn import forward_generation
-    from indonlg.utils.data_utils import MachineTranslationDataset, GenerationDataLoader
+    try:
+        from transformers import MBartTokenizer, MBartForConditionalGeneration
+        from indonlg.utils.metrics import generation_metrics_fn
+        from indonlg.utils.forward_fn import forward_generation
+    except ImportError:
+        raise ImportError(
+            "Could not import required modules. Make sure transformers and indonlg are installed."
+        )
 
 # Set up logging
 logging.basicConfig(
@@ -157,8 +171,8 @@ def evaluate(
             is_test=is_test,
             tokenizer=tokenizer,
             beam_size=beam_size,
-            max_seq_len=max_seq_len,
-            length_penalty=length_penalty
+            max_gen_length=max_seq_len,
+            min_gen_length=10
         )
         
         # Calculate evaluation metrics
@@ -392,167 +406,211 @@ def train(
     return all_val_metrics
 
 class IndoSUMDataset(Dataset):
-    """Custom dataset for IndoSUM summarization task"""
+    """
+    Custom dataset for IndoSUM dataset processing.
+    
+    This dataset handles the tokenization of input documents and target summaries.
+    """
     
     def __init__(
         self, 
-        hf_dataset, 
-        tokenizer, 
-        source_column: str = "document", 
-        target_column: str = "summary", 
-        max_source_length: int = 512, 
-        max_target_length: int = 128,
-        source_lang: str = "[indonesian]",
-        target_lang: str = "[indonesian]"
+        dataset: Union['Dataset', List[Dict[str, str]]],
+        tokenizer: 'MBartTokenizer',
+        source_column: str = 'document',
+        target_column: str = 'summary',
+        source_lang: str = '[indonesian]',
+        target_lang: str = '[indonesian]',
+        max_source_length: int = 1024,
+        max_target_length: int = 128
     ):
         """
-        Initialize the dataset.
+        Initialize IndoSUMDataset.
         
         Args:
-            hf_dataset: HuggingFace dataset
-            tokenizer: Tokenizer to use
-            source_column: Column name for source documents
-            target_column: Column name for target summaries
-            max_source_length: Maximum source length
-            max_target_length: Maximum target length
-            source_lang: Source language tag
-            target_lang: Target language tag
+            dataset: HuggingFace dataset or list of dictionaries
+            tokenizer: Tokenizer for encoding inputs
+            source_column: Column name for source text
+            target_column: Column name for target text
+            source_lang: Source language token
+            target_lang: Target language token
+            max_source_length: Maximum length for source text
+            max_target_length: Maximum length for target text
         """
-        self.dataset = hf_dataset
+        self.dataset = dataset
         self.tokenizer = tokenizer
         self.source_column = source_column
         self.target_column = target_column
-        self.max_source_length = max_source_length
-        self.max_target_length = max_target_length
         self.source_lang = source_lang
         self.target_lang = target_lang
+        self.max_source_length = max_source_length
+        self.max_target_length = max_target_length
         
-        # Get language IDs
-        self.src_lid = tokenizer.special_tokens_to_ids[source_lang]
-        self.tgt_lid = tokenizer.special_tokens_to_ids[target_lang]
+        # Get language token IDs
+        if source_lang in tokenizer.special_tokens_to_ids:
+            self.src_lid = tokenizer.special_tokens_to_ids[source_lang]
+        elif hasattr(tokenizer, 'lang_code_to_id') and source_lang in tokenizer.lang_code_to_id:
+            self.src_lid = tokenizer.lang_code_to_id[source_lang]
+        else:
+            # Fallback to standard token ID
+            self.src_lid = tokenizer.pad_token_id
+            
+        if target_lang in tokenizer.special_tokens_to_ids:
+            self.tgt_lid = tokenizer.special_tokens_to_ids[target_lang]
+        elif hasattr(tokenizer, 'lang_code_to_id') and target_lang in tokenizer.lang_code_to_id:
+            self.tgt_lid = tokenizer.lang_code_to_id[target_lang]
+        else:
+            # Fallback to standard token ID
+            self.tgt_lid = tokenizer.pad_token_id
     
-    def __len__(self):
+    def __len__(self) -> int:
+        """Return the number of examples in the dataset."""
         return len(self.dataset)
     
-    def __getitem__(self, idx):
-        """Get a sample from dataset"""
-        item = self.dataset[idx]
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Get a single example from the dataset.
         
-        # Get source and target texts
+        Args:
+            idx: Index of the example
+            
+        Returns:
+            Dictionary with preprocessed source and target texts
+        """
+        item = self.dataset[idx]
         source_text = item[self.source_column]
         target_text = item[self.target_column]
         
-        # Prepend language tags
-        source_text = f"{self.source_lang} {source_text}"
-        target_text = f"{self.target_lang} {target_text}"
-        
-        # Tokenize source
-        source_inputs = self.tokenizer(
+        # Tokenize source and target texts
+        src_inputs = self.tokenizer(
             source_text,
             max_length=self.max_source_length,
-            padding="max_length",
+            padding='max_length',
             truncation=True,
-            return_tensors="pt"
+            return_tensors='pt'
         )
         
-        # Tokenize target
-        target_inputs = self.tokenizer(
-            target_text,
-            max_length=self.max_target_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
-        )
+        with self.tokenizer.as_target_tokenizer():
+            tgt_inputs = self.tokenizer(
+                target_text,
+                max_length=self.max_target_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
         
-        # Remove batch dimension
-        source_inputs = {k: v.squeeze(0) for k, v in source_inputs.items()}
-        target_inputs = {k: v.squeeze(0) for k, v in target_inputs.items()}
+        # Extract tensors and convert to appropriate shape
+        source_ids = src_inputs['input_ids'].squeeze()
+        source_mask = src_inputs['attention_mask'].squeeze()
+        target_ids = tgt_inputs['input_ids'].squeeze()
         
-        # Prepare labels
-        labels = target_inputs["input_ids"].clone()
-        # Replace padding token id with -100 so it's ignored in loss calculation
+        # Replace padding with -100 for loss calculation
+        labels = target_ids.clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
         
         return {
-            "input_ids": source_inputs["input_ids"],
-            "attention_mask": source_inputs["attention_mask"],
-            "labels": labels,
-            # Store original texts for evaluation
-            "source_text": source_text,
-            "target_text": target_text
+            'source_ids': source_ids,
+            'source_mask': source_mask,
+            'target_ids': target_ids,
+            'labels': labels,
+            'source_text': source_text,
+            'target_text': target_text
         }
 
 def forward_pass(
     model: torch.nn.Module,
     batch: Dict[str, torch.Tensor],
-    device: str = "cpu",
+    device: str,
     is_inference: bool = False,
     is_test: bool = False,
-    tokenizer = None,
+    tokenizer: Optional[Any] = None,
     beam_size: int = 5,
-    max_seq_len: int = 512,
-    length_penalty: float = 1.0,
-    **kwargs
+    max_gen_length: int = 128,
+    min_gen_length: int = 10
 ) -> Tuple[torch.Tensor, List[str], List[str]]:
     """
-    Custom forward pass function for the IndoSUM dataset.
+    Perform forward pass for the model.
     
     Args:
-        model: Model to use
-        batch: Batch of data
-        device: Device to use
-        is_inference: Whether this is inference
-        is_test: Whether this is test
-        tokenizer: Tokenizer for decoding
-        beam_size: Beam size for generation
-        max_seq_len: Maximum sequence length
-        length_penalty: Length penalty for generation
+        model: The model to perform forward pass
+        batch: Input batch containing tokenized inputs
+        device: Device to run on
+        is_inference: Whether to run in inference mode
+        is_test: Whether this is for testing
+        tokenizer: Tokenizer for decoding outputs
+        beam_size: Beam size for beam search
+        max_gen_length: Maximum generation length
+        min_gen_length: Minimum generation length
         
     Returns:
-        Tuple of (loss, hypotheses, labels)
+        Tuple containing loss, hypotheses, and labels
     """
-    # Move inputs to device
-    input_ids = batch["input_ids"].to(device)
-    attention_mask = batch["attention_mask"].to(device)
-    labels = batch["labels"].to(device) if "labels" in batch else None
+    # Move batch data to device
+    source_ids = batch["source_ids"].to(device)
+    source_mask = batch["source_mask"].to(device)
     
-    # Forward pass
-    if is_inference or is_test:
-        # Generate summaries
+    # Get source and target texts
+    source_texts = batch["source_text"]
+    target_texts = batch["target_text"]
+    
+    if is_inference:
+        # Generate translations with beam search
         generated_ids = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=max_seq_len,
+            input_ids=source_ids,
+            attention_mask=source_mask,
             num_beams=beam_size,
-            length_penalty=length_penalty,
+            max_length=max_gen_length,
+            min_length=min_gen_length,
             early_stopping=True,
-            decoder_start_token_id=tokenizer.special_tokens_to_ids["[indonesian]"]
+            no_repeat_ngram_size=3,
+            length_penalty=1.0
         )
         
         # Decode generated ids
-        hypotheses = [tokenizer.decode(g, skip_special_tokens=True) for g in generated_ids]
-        labels = [tokenizer.decode(g, skip_special_tokens=True) for g in labels] if labels is not None else []
+        hypotheses = []
+        for g in generated_ids:
+            # Skip special tokens when decoding
+            hyp = tokenizer.decode(g, skip_special_tokens=True)
+            hypotheses.append(hyp)
         
-        # For test, we need to return a dummy loss
-        return torch.tensor(0.0, device=device), hypotheses, labels
+        # Return placeholder loss (not used in inference)
+        return torch.tensor(0.0), hypotheses, target_texts
     else:
-        # Training mode
+        # Get labels for loss calculation
+        labels = batch["labels"].to(device)
+        
+        # Forward pass to get loss
         outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            input_ids=source_ids,
+            attention_mask=source_mask,
             labels=labels,
             return_dict=True
         )
         
-        # Get loss
         loss = outputs.loss
         
-        # Get hypotheses and labels for metrics computation
-        # During training, we don't need to generate, we can use teacher forcing
-        hypotheses = [tokenizer.decode(g, skip_special_tokens=True) for g in input_ids]
-        label_texts = [tokenizer.decode(g, skip_special_tokens=True) for g in labels]
-        
-        return loss, hypotheses, label_texts
+        if is_test:
+            # For testing, generate with beam search even during training forward pass
+            generated_ids = model.generate(
+                input_ids=source_ids,
+                attention_mask=source_mask,
+                num_beams=beam_size,
+                max_length=max_gen_length,
+                min_length=min_gen_length,
+                early_stopping=True,
+                no_repeat_ngram_size=3,
+                length_penalty=1.0
+            )
+            
+            # Decode generated ids
+            hypotheses = []
+            for g in generated_ids:
+                hyp = tokenizer.decode(g, skip_special_tokens=True)
+                hypotheses.append(hyp)
+        else:
+            # During training, use target text directly
+            hypotheses = target_texts
+            
+        return loss, hypotheses, target_texts
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune IndoBART-v2 on IndoSUM")
@@ -640,7 +698,45 @@ def main():
     # Load model and tokenizer
     logger.info(f"Loading model and tokenizer from {args.model_name}")
     model = MBartForConditionalGeneration.from_pretrained(args.model_name)
-    tokenizer = IndoNLGTokenizer.from_pretrained(args.model_name)
+    
+    # Use MBartTokenizer instead of IndoNLGTokenizer
+    try:
+        tokenizer = MBartTokenizer.from_pretrained(args.model_name)
+        # Add Indonesian language tokens if not already present
+        special_tokens = {'additional_special_tokens': ['[indonesian]']}
+        if '[indonesian]' not in tokenizer.additional_special_tokens:
+            tokenizer.add_special_tokens(special_tokens)
+            # Resize model embeddings to match new tokenizer
+            model.resize_token_embeddings(len(tokenizer))
+        
+        # Get IDs for Indonesian tokens
+        src_lang_token = '[indonesian]'
+        tgt_lang_token = '[indonesian]'
+        src_lid = tokenizer.convert_tokens_to_ids(src_lang_token)
+        tgt_lid = tokenizer.convert_tokens_to_ids(tgt_lang_token)
+        
+        # Set up special token mapping
+        tokenizer.special_tokens_to_ids = {
+            '[indonesian]': src_lid
+        }
+    except Exception as e:
+        logger.error(f"Error loading tokenizer: {str(e)}")
+        logger.info("Falling back to standard MBartTokenizer with Indonesian language code")
+        
+        # Fallback to standard MBart tokenizer with Indonesian language code
+        tokenizer = MBartTokenizer.from_pretrained(args.model_name, src_lang="id_ID", tgt_lang="id_ID")
+        src_lid = tokenizer.lang_code_to_id["id_ID"]
+        tgt_lid = tokenizer.lang_code_to_id["id_ID"]
+        
+        # Create a mapping similar to what the IndoNLGTokenizer would have
+        tokenizer.special_tokens_to_ids = {
+            '[indonesian]': src_lid
+        }
+        
+        # Update source and target language args
+        args.source_lang = "id_ID"
+        args.target_lang = "id_ID"
+    
     logger.info(f"Model loaded with {count_param(model)} parameters")
     
     # Setup special tokens and language IDs
@@ -662,17 +758,52 @@ def main():
     valid_dataset_path = os.path.join(args.dataset_dir, args.valid_dataset_dir)
     test_dataset_path = os.path.join(args.dataset_dir, args.test_dataset_dir)
     
-    logger.info(f"Loading training dataset from {train_dataset_path}")
-    train_hf_dataset = load_from_disk(train_dataset_path)
-    logger.info(f"Loading validation dataset from {valid_dataset_path}")
-    valid_hf_dataset = load_from_disk(valid_dataset_path)
-    logger.info(f"Loading test dataset from {test_dataset_path}")
-    test_hf_dataset = load_from_disk(test_dataset_path)
+    # Check if dataset directories exist
+    if not os.path.exists(train_dataset_path):
+        raise FileNotFoundError(f"Training dataset directory not found at {train_dataset_path}")
+    if not os.path.exists(valid_dataset_path):
+        raise FileNotFoundError(f"Validation dataset directory not found at {valid_dataset_path}")
+    if not os.path.exists(test_dataset_path):
+        raise FileNotFoundError(f"Test dataset directory not found at {test_dataset_path}")
+    
+    # Load datasets with error handling
+    try:
+        logger.info(f"Loading training dataset from {train_dataset_path}")
+        train_hf_dataset = load_from_disk(train_dataset_path)
+        logger.info(f"Loading validation dataset from {valid_dataset_path}")
+        valid_hf_dataset = load_from_disk(valid_dataset_path)
+        logger.info(f"Loading test dataset from {test_dataset_path}")
+        test_hf_dataset = load_from_disk(test_dataset_path)
+    except Exception as e:
+        logger.error(f"Error loading datasets: {str(e)}")
+        logger.info("Checking dataset structure...")
+        # List contents of dataset directories to help diagnose
+        for dataset_dir in [train_dataset_path, valid_dataset_path, test_dataset_path]:
+            if os.path.exists(dataset_dir):
+                logger.info(f"Contents of {dataset_dir}:")
+                for item in os.listdir(dataset_dir):
+                    logger.info(f"  - {item}")
+        raise
+    
+    # Check if the expected columns exist
+    expected_columns = [args.source_column, args.target_column]
+    dataset_features = train_hf_dataset.features
+    logger.info(f"Dataset features: {dataset_features}")
+    for col in expected_columns:
+        if col not in train_hf_dataset.column_names:
+            available_cols = ', '.join(train_hf_dataset.column_names)
+            raise ValueError(f"Column '{col}' not found in dataset. Available columns: {available_cols}")
     
     # Print dataset information
     logger.info(f"Train dataset size: {len(train_hf_dataset)}")
     logger.info(f"Validation dataset size: {len(valid_hf_dataset)}")
     logger.info(f"Test dataset size: {len(test_hf_dataset)}")
+    
+    # Show a sample from the dataset
+    logger.info("Sample from training dataset:")
+    sample = train_hf_dataset[0]
+    for k, v in sample.items():
+        logger.info(f"  {k}: {v[:100]}..." if isinstance(v, str) and len(v) > 100 else f"  {k}: {v}")
     
     # Create custom datasets
     train_dataset = IndoSUMDataset(
@@ -680,30 +811,30 @@ def main():
         tokenizer, 
         source_column=args.source_column, 
         target_column=args.target_column,
-        max_source_length=args.max_seq_length,
-        max_target_length=args.max_seq_length // 2,  # Target is usually shorter
         source_lang=args.source_lang,
-        target_lang=args.target_lang
+        target_lang=args.target_lang,
+        max_source_length=args.max_seq_length,
+        max_target_length=args.max_seq_length // 2
     )
     valid_dataset = IndoSUMDataset(
         valid_hf_dataset, 
         tokenizer, 
         source_column=args.source_column, 
         target_column=args.target_column,
-        max_source_length=args.max_seq_length,
-        max_target_length=args.max_seq_length // 2,
         source_lang=args.source_lang,
-        target_lang=args.target_lang
+        target_lang=args.target_lang,
+        max_source_length=args.max_seq_length,
+        max_target_length=args.max_seq_length // 2
     )
     test_dataset = IndoSUMDataset(
         test_hf_dataset, 
         tokenizer, 
         source_column=args.source_column, 
         target_column=args.target_column,
-        max_source_length=args.max_seq_length,
-        max_target_length=args.max_seq_length // 2,
         source_lang=args.source_lang,
-        target_lang=args.target_lang
+        target_lang=args.target_lang,
+        max_source_length=args.max_seq_length,
+        max_target_length=args.max_seq_length // 2
     )
     
     # Create data loaders
