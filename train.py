@@ -316,6 +316,8 @@ def evaluate(
     i_value = max(0, i) if 'i' in locals() else 0
     
     if is_test:
+        # Return 4 values for test mode
         return total_loss/(i_value+1), metrics, list_hyp, list_label
     else:
+        # Return only 2 values for validation mode
         return total_loss/(i_value+1), metrics
