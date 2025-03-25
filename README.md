@@ -1,100 +1,142 @@
-# IndoBART-v2 Fine-tuning for IndoSUM
+# IndoBART Fine-tuning for IndoSUM Dataset
 
-This project fine-tunes the IndoBART-v2 model on the IndoSUM dataset for Indonesian text summarization. The trained model is evaluated after each checkpoint and can be pushed to the Hugging Face Hub.
+This repository contains code for fine-tuning the IndoBART-v2 model on the IndoSUM dataset for Indonesian text summarization.
 
-## Setup
+## Project Structure
 
-### Prerequisites
+- `main.py`: Main script that orchestrates the entire fine-tuning process
+- `data_loader.py`: Dataset handling and data loading utilities
+- `train.py`: Training functionality and loop implementation
+- `evaluate.py`: Evaluation metrics and prediction functionality
+- `hub_utils.py`: Utilities for pushing models to Hugging Face Hub
+- `plan.md`: Project plan and progress tracking
 
-- Python 3.6+
-- PyTorch 1.7+
-- Transformers 4.5+
-- IndoNLG/indobenchmark toolkit
+## Requirements
 
-### Installation
+```
+torch>=1.7.0
+transformers>=4.12.0
+datasets>=1.10.0
+rouge_score>=0.0.4
+sacrebleu>=1.5.0
+nltk>=3.6.0
+pandas>=1.1.0
+tqdm>=4.50.0
+```
 
-Install the required packages:
+Install the requirements using:
 
 ```bash
-pip install torch transformers pandas numpy tqdm sacrebleu rouge-score indobenchmark-toolkit huggingface_hub
+pip install -r requirements.txt
 ```
 
 ## Dataset
 
-The script expects the IndoSUM dataset in HuggingFace Datasets format with the following directory structure:
+The IndoSUM dataset should be organized in the following structure:
+
 ```
-~/dataset/indosum/
+../dataset/indosum/
 ├── traindataset/
 ├── devdataset/
 └── testdataset/
 ```
 
-The dataset should contain at least two columns:
-- `document`: The source document to summarize
-- `summary`: The target summary
+Each directory should contain the dataset in the Hugging Face Datasets format, with at least "document" and "summary" columns.
 
-## Training
+## Usage
 
-To train the model with default parameters:
+### Training
+
+To fine-tune the IndoBART-v2 model on the IndoSUM dataset:
 
 ```bash
-python train.py
+python main.py \
+    --data_dir ../dataset/indosum \
+    --output_dir ./results \
+    --model_dir ./save \
+    --batch_size 8 \
+    --lr 3e-5 \
+    --n_epochs 5 \
+    --evaluate_every 1 \
+    --early_stop 3 \
+    --valid_criterion ROUGE1 \
+    --beam_size 5
 ```
 
-### Common Parameters
+### Options
 
-- `--model_name`: Pretrained model name (default: "indobenchmark/indobart-v2")
-- `--output_dir`: Directory to save checkpoints (default: "./checkpoints/indosum")
-- `--dataset_dir`: Directory with the IndoSUM dataset (default: "./dataset/IndoSUM")
-- `--num_epochs`: Number of training epochs (default: 10)
-- `--train_batch_size`: Training batch size (default: 8)
-- `--learning_rate`: Initial learning rate (default: 5e-5)
+- `--data_dir`: Directory containing the dataset (default: ../dataset/indosum)
+- `--output_dir`: Directory to save outputs (default: ./results)
+- `--model_dir`: Directory to save models (default: ./save)
+- `--model_name`: Pretrained model name or path (default: indobenchmark/indobart)
+- `--max_seq_len`: Maximum sequence length (default: 512)
+- `--max_source_length`: Maximum source sequence length (default: 1024)
+- `--max_target_length`: Maximum target sequence length (default: 256)
+- `--batch_size`: Batch size (default: 8)
+- `--lr`: Learning rate (default: 3e-5)
+- `--n_epochs`: Number of epochs (default: 5)
+- `--evaluate_every`: Evaluate every n epochs (default: 1)
+- `--early_stop`: Early stopping patience (default: 3)
+- `--valid_criterion`: Validation criterion (default: ROUGE1)
 - `--beam_size`: Beam size for generation (default: 5)
-- `--fp16`: Use mixed precision training
-- `--seed`: Random seed (default: 42)
+- `--fp16`: Use FP16 precision (flag)
+- `--push_to_hub`: Push model to Hugging Face Hub (flag)
+- `--hub_model_id`: Repository ID for Hugging Face Hub
+- `--hub_private`: Make Hugging Face Hub repository private (flag)
 
-### Pushing to Hugging Face Hub
+## Pushing to Hugging Face Hub
 
-To push the fine-tuned model to the Hugging Face Hub:
+To fine-tune and push the model to Hugging Face Hub:
 
 ```bash
-python train.py --push_to_hub --hub_model_id "your-username/indobart-v2-indosum" --hub_token "your_hf_token"
+python main.py \
+    --push_to_hub \
+    --hub_model_id your-username/indobart-finetuned-indosum \
+    --hub_token your_token
 ```
 
-## Evaluation
+You'll need to set up your Hugging Face credentials first.
 
-The script automatically evaluates the model after each epoch and on the test set after training. Metrics include:
+## Using the Fine-tuned Model
+
+After fine-tuning, you can use the model for summarization:
+
+```python
+from transformers import MBartForConditionalGeneration, AutoTokenizer
+
+# Load the model and tokenizer
+model = MBartForConditionalGeneration.from_pretrained("path/to/model")
+tokenizer = AutoTokenizer.from_pretrained("path/to/model")
+
+# Prepare the text to be summarized
+text = "YOUR_INDONESIAN_TEXT_TO_SUMMARIZE"
+
+# Tokenize the text
+inputs = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True)
+
+# Generate the summary
+summary_ids = model.generate(
+    inputs["input_ids"],
+    num_beams=5,
+    max_length=256,
+    early_stopping=True,
+    no_repeat_ngram_size=3,
+    length_penalty=1.0
+)
+
+# Decode the summary
+summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+print(summary)
+```
+
+## Evaluation Metrics
+
+The model is evaluated using the following metrics:
 - BLEU
 - SacreBLEU
-- ROUGE-1, ROUGE-2, ROUGE-L
+- ROUGE1, ROUGE2, ROUGEL, ROUGELsum
 
-Results are saved in:
-- `validation_metrics.csv`: Metrics for each validation epoch
-- `test_metrics.csv`: Final test set metrics
-- `test_predictions.csv`: Model predictions vs. gold references
+## References
 
-## Outputs
-
-The training script generates:
-- Checkpoint files for each epoch
-- The best model based on validation performance
-- Evaluation metrics for validation and test sets
-- Prediction results with model outputs and gold references
-
-## Advanced Configuration
-
-For more configuration options, see the full list of parameters in the script or run:
-
-```bash
-python train.py --help
-```
-
-## Debugging
-
-If you encounter issues:
-
-1. Check that the dataset files exist and are in the correct format
-2. Verify your GPU memory is sufficient for the chosen batch size
-3. Try running with a smaller batch size and gradient accumulation
-4. Check the IndoNLG library version is compatible with your Transformers version
-5. See `plan.md` for more debugging tips
+- [IndoBART](https://huggingface.co/indobenchmark/indobart)
+- [Hugging Face Transformers](https://huggingface.co/transformers/)

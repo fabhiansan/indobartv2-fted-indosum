@@ -1,79 +1,81 @@
-# Fine-tuning IndoBART-v2 on IndoSUM Dataset
+# IndoBART-v2 Fine-tuning on IndoSUM Dataset
 
-## Project Overview
-This project aims to fine-tune the IndoBART-v2 model on the IndoSUM dataset for Indonesian text summarization. The trained model will be evaluated after each checkpoint and finally pushed to the Hugging Face Hub.
+## Project Plan
 
-## Implementation Plan
+This document outlines the development process for fine-tuning an IndoBART-v2 model on the IndoSUM dataset and pushing the fine-tuned model to Huggingface Hub.
 
-### 1. Environment Setup
-- Import necessary libraries from PyTorch, Transformers, and IndoNLG
-- Set up logging and seed for reproducibility
+### File Structure
 
-### 2. Model and Tokenizer Configuration
-- Load pretrained IndoBART-v2 model and tokenizer
-- Configure model parameters and optimizer
+1. **data_loader.py**
+   - Contains dataset handling logic for IndoSUM dataset
+   - Implements custom Dataset and DataLoader classes
+   - Location references: `../dataset/indosum`
 
-### 3. Dataset Preparation
-- Set up the IndoSUM dataset (already downloaded)
-- Create train/validation/test data loaders
+2. **train.py**
+   - Training loop implementation
+   - Learning rate scheduling
+   - Early stopping mechanism
+   - Checkpoint saving
 
-### 4. Training Pipeline
-- Implement the training loop with gradient accumulation
-- Add evaluation metrics after each epoch (BLEU, SacreBLEU, ROUGE)
-- Save checkpoints during training
-- Add early stopping mechanism
+3. **evaluate.py**
+   - Evaluation functionality
+   - Metrics calculation (BLEU, SacreBLEU, ROUGE scores)
+   - Generation of prediction results
 
-### 5. Checkpoint Evaluation
-- Evaluate model performance at each checkpoint
-- Generate and save metrics
-- Create prediction results and confusion matrices
+4. **hub_utils.py**
+   - Huggingface Hub integration
+   - Model and tokenizer pushing functionality
 
-### 6. Hugging Face Hub Integration
-- Add model saving functionality
-- Configure the Hugging Face Hub API
-- Push the fine-tuned model to the Hub with appropriate metadata
+5. **main.py**
+   - Orchestrates the entire process
+   - Argument parsing
+   - Model loading and configuration
+   - Training, evaluation, and pushing
 
-## Code Structure
-- `train.py`: Main script for training the model
-- `utils.py`: Helper functions for metrics, evaluation, data loading
-- `hf_utils.py`: Utilities for Hugging Face Hub integration
+### Progress Tracking
 
-## Resource Files and Paths
-- IndoBART-v2 base model: `indobenchmark/indobart-v2`
-- IndoSUM dataset: Expected at `./dataset/IndoSUM/`
-- Checkpoints: Will be saved at `./checkpoints/indosum/`
+- [ ] Create data_loader.py
+- [ ] Create train.py
+- [ ] Create evaluate.py
+- [ ] Create hub_utils.py
+- [ ] Create main.py
+- [ ] Test full pipeline locally
+- [ ] Push to Huggingface Hub
 
-## Debugging Tips
+### Implementation Notes
 
-### Common Issues and Solutions
+#### data_loader.py
+- Implement SummarizationDataset class
+- Create SummarizationDataLoader
 
-#### Import and Path Issues
-- Check `sys.path.append('../')` to ensure modules are found
-- Verify IndoNLG tokenizer import paths
+#### train.py
+- Implement train() function
+- Add checkpoint saving functionality
+- Add learning rate scheduling
 
-#### Model Loading Issues
-- If tokenizer has issues, check for updates in the IndoNLG library
-- If model loading fails, check GPU memory and reduce batch size
+#### evaluate.py
+- Implement evaluate() function
+- Add metrics computation (BLEU, SacreBLEU, ROUGE)
+- Add prediction output functionality
 
-#### Training Problems
-- Monitor loss values to detect NaN or extremely high values
-- If training is unstable, reduce learning rate or add gradient clipping
+#### hub_utils.py
+- Implement push_to_hub() function
 
-#### Data Loading Issues
-- Validate dataset format and paths
-- Check max sequence length for long documents
+#### main.py
+- Parse command line arguments
+- Create training and evaluation pipelines
+- Handle model loading and saving
+- Push to Huggingface Hub
 
-#### CUDA Out of Memory
-- Reduce batch size
-- Implement gradient accumulation
-- Use mixed precision training (fp16)
+### Debugging Reference
 
-#### Evaluation Metrics
-- Verify BLEU and ROUGE score calculations
-- Check token normalization for Indonesian text
+#### Common Issues
+- IndoNLGTokenizer might need special handling for language IDs
+- Sequence length limitations (512 tokens)
+- Memory management for large batch sizes
+- GPU CUDA issues
 
-### Key Code Locations
-- Training loop: Found in the `train.py` script
-- Forward pass: Check `forward_generation` in utils
-- Evaluation function: Review the `evaluate` function
-- Metric calculation: See `generation_metrics_fn`
+#### Helpful Commands
+- Check CUDA availability: `torch.cuda.is_available()`
+- Memory usage: `torch.cuda.memory_summary()`
+- Model parameter count: `sum(p.numel() for p in model.parameters())`
