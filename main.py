@@ -19,7 +19,7 @@ from hub_utils import save_model_to_disk, push_to_hub, create_model_card
 
 # Import transformers
 from transformers import MBartForConditionalGeneration
-from indonlg.tokenization_indonlg import IndoNLGTokenizer
+from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
 
 # Configure logging
 logging.basicConfig(

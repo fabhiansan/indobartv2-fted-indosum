@@ -127,6 +127,15 @@ def create_model_card(
     for name, value in metrics.items():
         metrics_table += f"| {name} | {value:.2f} |\n"
     
+    # Create citation with URL
+    citation = f"""@misc{{indobart-indosum,
+  author = {{{{IndoNLP Team}}}},
+  title = {{{{IndoBART fine-tuned on IndoSUM}}}},
+  year = {{2025}},
+  publisher = {{Hugging Face}},
+  howpublished = {{\\\\url{{https://huggingface.co/{repo_id}}}}}
+}}"""
+    
     # Create model card content
     model_card = f"""---
 language: {language.lower()}
@@ -214,13 +223,7 @@ print(summary)
 ## Citation
 
 ```
-@misc{indobart-indosum,
-  author = {{IndoNLP Team}},
-  title = {{IndoBART fine-tuned on IndoSUM}},
-  year = {2025},
-  publisher = {Hugging Face},
-  howpublished = {\\url{https://huggingface.co/" + repo_id + "}}
-}
+{citation}
 ```
 """
     

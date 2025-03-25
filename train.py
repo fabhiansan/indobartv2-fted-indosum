@@ -7,10 +7,8 @@ import os
 import torch
 import numpy as np
 import random
-from torch import optim
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
-from transformers import MBartForConditionalGeneration
 import logging
 
 # Import custom tokenizer - using relative import since it's within the project
@@ -59,7 +57,7 @@ def metrics_to_string(metric_dict: Dict[str, float]) -> str:
     """
     string_list = []
     for key, value in metric_dict.items():
-        string_list.append('{}:{:.2f}'.format(key, value))
+        string_list.append('%s:%.2f' % (key, value))
     return ' '.join(string_list)
 
 
@@ -186,7 +184,7 @@ def train(
             
             current_lr = get_lr(optimizer)
             train_pbar.set_description(
-                f"(Epoch {epoch+1}) TRAIN LOSS:{total_train_loss/(i+1):.4f} LR:{current_lr:.8f}"
+                "(Epoch %d) TRAIN LOSS:%.4f LR:%.8f" % (epoch+1, total_train_loss/(i+1), current_lr)
             )
             
             if (i + 1) % grad_accum == 0:
@@ -197,8 +195,8 @@ def train(
         metrics = metrics_fn(list_hyp, list_label)
         
         logger.info(
-            f"(Epoch {epoch+1}) TRAIN LOSS:{total_train_loss/(i+1):.4f} "
-            f"{metrics_to_string(metrics)} LR:{current_lr:.8f}"
+            "(Epoch %d) TRAIN LOSS:%.4f %s LR:%.8f",
+            epoch+1, total_train_loss/(i+1), metrics_to_string(metrics), current_lr
         )
         
         # Store training history
@@ -218,7 +216,8 @@ def train(
             )
             
             logger.info(
-                f"(Epoch {epoch+1}) VALID LOSS:{val_loss:.4f} {metrics_to_string(val_metrics)}"
+                "(Epoch %d) VALID LOSS:%.4f %s",
+                epoch+1, val_loss, metrics_to_string(val_metrics)
             )
             
             # Store validation history
@@ -242,9 +241,9 @@ def train(
                     checkpoint_callback(model, epoch, checkpoint_path, val_metric)
             else:
                 count_stop += 1
-                logger.info(f"count stop: {count_stop}")
+                logger.info("count stop: %d", count_stop)
                 if count_stop == early_stop:
-                    logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                    logger.info("Early stopping triggered after %d epochs", epoch+1)
                     break
     
     return history
@@ -307,13 +306,16 @@ def evaluate(
             test_loss = loss.item()
             total_loss = total_loss + test_loss
             
-            pbar.set_description(f"VALID LOSS:{total_loss/(i+1):.4f}")
+            pbar.set_description("VALID LOSS:%.4f" % (total_loss/(i+1)))
         else:
             pbar.set_description("TESTING... ")
     
     metrics = metrics_fn(list_hyp, list_label)
     
+    # Store i value in case the loop is empty
+    i_value = max(0, i) if 'i' in locals() else 0
+    
     if is_test:
-        return total_loss/(i+1), metrics, list_hyp, list_label
+        return total_loss/(i_value+1), metrics, list_hyp, list_label
     else:
-        return total_loss/(i+1), metrics
+        return total_loss/(i_value+1), metrics
