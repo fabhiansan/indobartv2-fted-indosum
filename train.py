@@ -416,7 +416,7 @@ class IndoSUMDataset(Dataset):
         self, 
         dataset: Union['Dataset', List[Dict[str, str]]],
         tokenizer: 'MBartTokenizer',
-        source_column: str = 'document',
+        source_column: str = 'article',
         target_column: str = 'summary',
         source_lang: str = '[indonesian]',
         target_lang: str = '[indonesian]',
@@ -445,22 +445,35 @@ class IndoSUMDataset(Dataset):
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         
-        # Get language token IDs
-        if source_lang in tokenizer.special_tokens_to_ids:
-            self.src_lid = tokenizer.special_tokens_to_ids[source_lang]
-        elif hasattr(tokenizer, 'lang_code_to_id') and source_lang in tokenizer.lang_code_to_id:
-            self.src_lid = tokenizer.lang_code_to_id[source_lang]
-        else:
-            # Fallback to standard token ID
-            self.src_lid = tokenizer.pad_token_id
+        # Set src and tgt language for MBartTokenizer
+        if hasattr(tokenizer, 'lang_code_to_id'):
+            # Use standard MBart language codes
+            self.mbart_mode = True
+            if isinstance(source_lang, str) and source_lang.startswith('['):
+                # Convert indonesian token to MBart language code
+                self.src_lang_code = "id_ID"
+                self.tgt_lang_code = "id_ID"
+            else:
+                self.src_lang_code = source_lang
+                self.tgt_lang_code = target_lang
+                
+            # Set the current language for the tokenizer
+            self.tokenizer.src_lang = self.src_lang_code
+            self.tokenizer.tgt_lang = self.tgt_lang_code
             
-        if target_lang in tokenizer.special_tokens_to_ids:
-            self.tgt_lid = tokenizer.special_tokens_to_ids[target_lang]
-        elif hasattr(tokenizer, 'lang_code_to_id') and target_lang in tokenizer.lang_code_to_id:
-            self.tgt_lid = tokenizer.lang_code_to_id[target_lang]
+            # Get language IDs
+            self.src_lid = tokenizer.lang_code_to_id[self.src_lang_code]
+            self.tgt_lid = tokenizer.lang_code_to_id[self.tgt_lang_code]
         else:
-            # Fallback to standard token ID
-            self.tgt_lid = tokenizer.pad_token_id
+            # Use special tokens mode for custom tokenizers
+            self.mbart_mode = False
+            if hasattr(tokenizer, 'special_tokens_to_ids'):
+                self.src_lid = tokenizer.special_tokens_to_ids.get(source_lang, tokenizer.pad_token_id)
+                self.tgt_lid = tokenizer.special_tokens_to_ids.get(target_lang, tokenizer.pad_token_id)
+            else:
+                # Fallback to pad token ID
+                self.src_lid = tokenizer.pad_token_id
+                self.tgt_lid = tokenizer.pad_token_id
     
     def __len__(self) -> int:
         """Return the number of examples in the dataset."""
@@ -480,16 +493,46 @@ class IndoSUMDataset(Dataset):
         source_text = item[self.source_column]
         target_text = item[self.target_column]
         
-        # Tokenize source and target texts
-        src_inputs = self.tokenizer(
-            source_text,
-            max_length=self.max_source_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
-        with self.tokenizer.as_target_tokenizer():
+        # Tokenize source text
+        if self.mbart_mode:
+            # For standard MBart tokenizer with language codes
+            src_inputs = self.tokenizer(
+                source_text,
+                max_length=self.max_source_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt',
+                src_lang=self.src_lang_code
+            )
+            
+            # Tokenize target text without the context manager
+            tgt_inputs = self.tokenizer(
+                target_text,
+                max_length=self.max_target_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt',
+                tgt_lang=self.tgt_lang_code,
+                add_special_tokens=True,
+                # Ensure we're in target mode
+                forced_bos_token_id=self.tgt_lid
+            )
+        else:
+            # For custom tokenizers
+            # Prepend language tokens if using special tokens
+            if self.source_lang.startswith('['):
+                source_text = f"{self.source_lang} {source_text}"
+                target_text = f"{self.target_lang} {target_text}"
+                
+            src_inputs = self.tokenizer(
+                source_text,
+                max_length=self.max_source_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            
+            # For non-MBart tokenizers, we don't need the context manager
             tgt_inputs = self.tokenizer(
                 target_text,
                 max_length=self.max_target_length,
@@ -632,6 +675,10 @@ def main():
                         help="Column name for source documents")
     parser.add_argument("--target_column", type=str, default="summary", 
                         help="Column name for target summaries")
+    parser.add_argument("--source_lang", type=str, default="id_ID", 
+                        help="Source language code")
+    parser.add_argument("--target_lang", type=str, default="id_ID", 
+                        help="Target language code")
     parser.add_argument("--num_epochs", type=int, default=10, 
                         help="Number of training epochs")
     parser.add_argument("--train_batch_size", type=int, default=8, 
@@ -669,12 +716,6 @@ def main():
     parser.add_argument("--force", action="store_true", 
                         help="Overwrite output directory if exists")
     
-    # Language tags
-    parser.add_argument("--source_lang", type=str, default="[indonesian]", 
-                        help="Source language token")
-    parser.add_argument("--target_lang", type=str, default="[indonesian]", 
-                        help="Target language token")
-    
     # Hugging Face Hub arguments
     parser.add_argument("--push_to_hub", action="store_true", 
                         help="Push model to Hugging Face Hub")
@@ -701,51 +742,85 @@ def main():
     
     # Use MBartTokenizer instead of IndoNLGTokenizer
     try:
-        tokenizer = MBartTokenizer.from_pretrained(args.model_name)
-        # Add Indonesian language tokens if not already present
-        special_tokens = {'additional_special_tokens': ['[indonesian]']}
-        if '[indonesian]' not in tokenizer.additional_special_tokens:
-            tokenizer.add_special_tokens(special_tokens)
-            # Resize model embeddings to match new tokenizer
-            model.resize_token_embeddings(len(tokenizer))
+        logger.info(f"Initializing tokenizer with src_lang={args.source_lang}, tgt_lang={args.target_lang}")
+        # Try initializing with explicit src_lang and tgt_lang
+        tokenizer = MBartTokenizer.from_pretrained(
+            args.model_name, 
+            src_lang=args.source_lang,
+            tgt_lang=args.target_lang
+        )
         
-        # Get IDs for Indonesian tokens
-        src_lang_token = '[indonesian]'
-        tgt_lang_token = '[indonesian]'
-        src_lid = tokenizer.convert_tokens_to_ids(src_lang_token)
-        tgt_lid = tokenizer.convert_tokens_to_ids(tgt_lang_token)
+        # For compatibility, make sure both languages are set
+        if not hasattr(tokenizer, 'src_lang') or tokenizer.src_lang is None:
+            tokenizer.src_lang = args.source_lang
+        if not hasattr(tokenizer, 'tgt_lang') or tokenizer.tgt_lang is None:
+            tokenizer.tgt_lang = args.target_lang
+            
+        # Log the tokenizer configuration
+        logger.info(f"Successfully initialized tokenizer: src_lang={tokenizer.src_lang}, tgt_lang={tokenizer.tgt_lang}")
         
-        # Set up special token mapping
-        tokenizer.special_tokens_to_ids = {
-            '[indonesian]': src_lid
-        }
+        # Create dictionary for special tokens if needed
+        if not hasattr(tokenizer, 'special_tokens_to_ids'):
+            tokenizer.special_tokens_to_ids = {}
+            
+        # Set up special token mapping for Indonesian
+        tokenizer.special_tokens_to_ids[args.source_lang] = tokenizer.lang_code_to_id[args.source_lang]
+        tokenizer.special_tokens_to_ids[args.target_lang] = tokenizer.lang_code_to_id[args.target_lang]
+        
     except Exception as e:
-        logger.error(f"Error loading tokenizer: {str(e)}")
-        logger.info("Falling back to standard MBartTokenizer with Indonesian language code")
+        logger.error(f"Error initializing tokenizer with language codes: {str(e)}")
+        logger.info("Attempting to initialize without language codes...")
         
-        # Fallback to standard MBart tokenizer with Indonesian language code
-        tokenizer = MBartTokenizer.from_pretrained(args.model_name, src_lang="id_ID", tgt_lang="id_ID")
-        src_lid = tokenizer.lang_code_to_id["id_ID"]
-        tgt_lid = tokenizer.lang_code_to_id["id_ID"]
+        # Try initializing without language codes
+        tokenizer = MBartTokenizer.from_pretrained(args.model_name)
         
-        # Create a mapping similar to what the IndoNLGTokenizer would have
-        tokenizer.special_tokens_to_ids = {
-            '[indonesian]': src_lid
-        }
-        
-        # Update source and target language args
-        args.source_lang = "id_ID"
-        args.target_lang = "id_ID"
+        # Set language codes after initialization
+        try:
+            tokenizer.src_lang = args.source_lang
+            tokenizer.tgt_lang = args.target_lang
+            
+            # Set up special tokens for Indonesian
+            special_tokens = {'additional_special_tokens': ['[indonesian]']}
+            tokenizer.add_special_tokens(special_tokens)
+            model.resize_token_embeddings(len(tokenizer))
+            
+            # Create mapping for special tokens
+            tokenizer.special_tokens_to_ids = {
+                args.source_lang: tokenizer.convert_tokens_to_ids('[indonesian]'),
+                args.target_lang: tokenizer.convert_tokens_to_ids('[indonesian]')
+            }
+        except Exception as e2:
+            logger.error(f"Error setting language attributes: {str(e2)}")
+            raise RuntimeError("Could not initialize tokenizer properly. Please check model compatibility.")
     
     logger.info(f"Model loaded with {count_param(model)} parameters")
     
-    # Setup special tokens and language IDs
-    src_lid = tokenizer.special_tokens_to_ids[args.source_lang]
-    tgt_lid = tokenizer.special_tokens_to_ids[args.target_lang]
+    # Verify that language IDs are properly set
+    try:
+        src_lid = tokenizer.special_tokens_to_ids[args.source_lang]
+        tgt_lid = tokenizer.special_tokens_to_ids[args.target_lang]
+        logger.info(f"Language ID tokens: src_lid={src_lid}, tgt_lid={tgt_lid}")
+    except Exception as e:
+        logger.error(f"Error accessing language IDs: {str(e)}")
+        logger.info("Setting up default language IDs...")
+        
+        # Set up default language IDs
+        src_lid = tokenizer.lang_code_to_id[args.source_lang]
+        tgt_lid = tokenizer.lang_code_to_id[args.target_lang]
+        tokenizer.special_tokens_to_ids = {
+            args.source_lang: src_lid,
+            args.target_lang: tgt_lid
+        }
+        logger.info(f"Set default language IDs: src_lid={src_lid}, tgt_lid={tgt_lid}")
     
-    # Inject language ID as BOS token in model.generate() function
-    tokenizer.bos_token = args.target_lang
+    # Set decoder start token ID to target language ID
     model.config.decoder_start_token_id = tgt_lid
+    logger.info(f"Set decoder_start_token_id to {tgt_lid}")
+    
+    # If using forced BOS token, verify it's set properly
+    if hasattr(model.config, 'forced_bos_token_id'):
+        model.config.forced_bos_token_id = tgt_lid
+        logger.info(f"Set forced_bos_token_id to {tgt_lid}")
     
     # Check CUDA availability
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
