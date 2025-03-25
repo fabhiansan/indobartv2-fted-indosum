@@ -21,10 +21,17 @@ pip install torch transformers pandas numpy tqdm sacrebleu rouge-score indobench
 
 ## Dataset
 
-The script expects the IndoSUM dataset to be present in the `./dataset/IndoSUM/` directory with the following files:
-- `train_preprocess.json`
-- `valid_preprocess.json`
-- `test_preprocess.json`
+The script expects the IndoSUM dataset in HuggingFace Datasets format with the following directory structure:
+```
+~/dataset/indosum/
+├── traindataset/
+├── devdataset/
+└── testdataset/
+```
+
+The dataset should contain at least two columns:
+- `document`: The source document to summarize
+- `summary`: The target summary
 
 ## Training
 

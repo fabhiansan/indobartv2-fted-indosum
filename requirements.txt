@@ -1,0 +1,12 @@
+torch>=1.7.0
+transformers>=4.5.0
+datasets>=1.5.0
+numpy>=1.19.0
+pandas>=1.1.0
+tqdm>=4.50.0
+sacrebleu>=2.0.0
+rouge-score>=0.0.4
+matplotlib>=3.3.0
+scikit-learn>=0.24.0
+huggingface_hub>=0.0.8
+indobenchmark-nlp

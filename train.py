@@ -20,8 +20,10 @@ from torch import optim
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 from transformers import MBartForConditionalGeneration, get_linear_schedule_with_warmup
-# from transformers.file_utils import is_torch_tpu_available
+from transformers.file_utils import is_torch_tpu_available
 from huggingface_hub import HfApi
+from datasets import load_from_disk, concatenate_datasets
+from torch.utils.data import DataLoader, Dataset
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -146,11 +148,17 @@ def evaluate(
 
     pbar = tqdm(iter(data_loader), leave=True, total=len(data_loader))
     for i, batch_data in enumerate(pbar):
+        # Call the forward function
         loss, batch_hyp, batch_label = forward_fn(
-            model, batch_data, model_type=model_type, tokenizer=tokenizer, 
-            device=device, is_inference=is_test, is_test=is_test, 
-            skip_special_tokens=True, beam_size=beam_size, 
-            max_seq_len=max_seq_len, length_penalty=length_penalty
+            model=model, 
+            batch=batch_data, 
+            device=device, 
+            is_inference=True, 
+            is_test=is_test,
+            tokenizer=tokenizer,
+            beam_size=beam_size,
+            max_seq_len=max_seq_len,
+            length_penalty=length_penalty
         )
         
         # Calculate evaluation metrics
@@ -254,8 +262,12 @@ def train(
             if fp16:
                 with autocast():
                     loss, batch_hyp, batch_label = forward_fn(
-                        model, batch_data, model_type=model_type, tokenizer=tokenizer, 
-                        device=device, skip_special_tokens=False, is_test=False
+                        model=model,
+                        batch=batch_data,
+                        device=device,
+                        is_inference=False,
+                        is_test=False,
+                        tokenizer=tokenizer
                     )
                 
                 # Scale the loss and call backward()
@@ -274,8 +286,12 @@ def train(
                     optimizer.zero_grad()
             else:
                 loss, batch_hyp, batch_label = forward_fn(
-                    model, batch_data, model_type=model_type, tokenizer=tokenizer, 
-                    device=device, skip_special_tokens=False, is_test=False
+                    model=model,
+                    batch=batch_data,
+                    device=device,
+                    is_inference=False,
+                    is_test=False,
+                    tokenizer=tokenizer
                 )
                 
                 loss = loss / grad_accum
@@ -310,8 +326,16 @@ def train(
         # Evaluate
         if evaluate_during_training and ((epoch+1) % evaluate_every) == 0:
             val_loss, val_metrics = evaluate(
-                model, valid_loader, forward_fn, metrics_fn, model_type, tokenizer, 
-                is_test=False, beam_size=beam_size, max_seq_len=max_seq_len, device=device
+                model=model, 
+                data_loader=valid_loader, 
+                forward_fn=forward_fn, 
+                metrics_fn=metrics_fn, 
+                model_type=model_type, 
+                tokenizer=tokenizer, 
+                is_test=False, 
+                beam_size=beam_size, 
+                max_seq_len=max_seq_len, 
+                device=device
             )
             
             all_val_metrics.append(val_metrics)
@@ -367,6 +391,169 @@ def train(
     
     return all_val_metrics
 
+class IndoSUMDataset(Dataset):
+    """Custom dataset for IndoSUM summarization task"""
+    
+    def __init__(
+        self, 
+        hf_dataset, 
+        tokenizer, 
+        source_column: str = "document", 
+        target_column: str = "summary", 
+        max_source_length: int = 512, 
+        max_target_length: int = 128,
+        source_lang: str = "[indonesian]",
+        target_lang: str = "[indonesian]"
+    ):
+        """
+        Initialize the dataset.
+        
+        Args:
+            hf_dataset: HuggingFace dataset
+            tokenizer: Tokenizer to use
+            source_column: Column name for source documents
+            target_column: Column name for target summaries
+            max_source_length: Maximum source length
+            max_target_length: Maximum target length
+            source_lang: Source language tag
+            target_lang: Target language tag
+        """
+        self.dataset = hf_dataset
+        self.tokenizer = tokenizer
+        self.source_column = source_column
+        self.target_column = target_column
+        self.max_source_length = max_source_length
+        self.max_target_length = max_target_length
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        
+        # Get language IDs
+        self.src_lid = tokenizer.special_tokens_to_ids[source_lang]
+        self.tgt_lid = tokenizer.special_tokens_to_ids[target_lang]
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        """Get a sample from dataset"""
+        item = self.dataset[idx]
+        
+        # Get source and target texts
+        source_text = item[self.source_column]
+        target_text = item[self.target_column]
+        
+        # Prepend language tags
+        source_text = f"{self.source_lang} {source_text}"
+        target_text = f"{self.target_lang} {target_text}"
+        
+        # Tokenize source
+        source_inputs = self.tokenizer(
+            source_text,
+            max_length=self.max_source_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt"
+        )
+        
+        # Tokenize target
+        target_inputs = self.tokenizer(
+            target_text,
+            max_length=self.max_target_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt"
+        )
+        
+        # Remove batch dimension
+        source_inputs = {k: v.squeeze(0) for k, v in source_inputs.items()}
+        target_inputs = {k: v.squeeze(0) for k, v in target_inputs.items()}
+        
+        # Prepare labels
+        labels = target_inputs["input_ids"].clone()
+        # Replace padding token id with -100 so it's ignored in loss calculation
+        labels[labels == self.tokenizer.pad_token_id] = -100
+        
+        return {
+            "input_ids": source_inputs["input_ids"],
+            "attention_mask": source_inputs["attention_mask"],
+            "labels": labels,
+            # Store original texts for evaluation
+            "source_text": source_text,
+            "target_text": target_text
+        }
+
+def forward_pass(
+    model: torch.nn.Module,
+    batch: Dict[str, torch.Tensor],
+    device: str = "cpu",
+    is_inference: bool = False,
+    is_test: bool = False,
+    tokenizer = None,
+    beam_size: int = 5,
+    max_seq_len: int = 512,
+    length_penalty: float = 1.0,
+    **kwargs
+) -> Tuple[torch.Tensor, List[str], List[str]]:
+    """
+    Custom forward pass function for the IndoSUM dataset.
+    
+    Args:
+        model: Model to use
+        batch: Batch of data
+        device: Device to use
+        is_inference: Whether this is inference
+        is_test: Whether this is test
+        tokenizer: Tokenizer for decoding
+        beam_size: Beam size for generation
+        max_seq_len: Maximum sequence length
+        length_penalty: Length penalty for generation
+        
+    Returns:
+        Tuple of (loss, hypotheses, labels)
+    """
+    # Move inputs to device
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device) if "labels" in batch else None
+    
+    # Forward pass
+    if is_inference or is_test:
+        # Generate summaries
+        generated_ids = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_length=max_seq_len,
+            num_beams=beam_size,
+            length_penalty=length_penalty,
+            early_stopping=True,
+            decoder_start_token_id=tokenizer.special_tokens_to_ids["[indonesian]"]
+        )
+        
+        # Decode generated ids
+        hypotheses = [tokenizer.decode(g, skip_special_tokens=True) for g in generated_ids]
+        labels = [tokenizer.decode(g, skip_special_tokens=True) for g in labels] if labels is not None else []
+        
+        # For test, we need to return a dummy loss
+        return torch.tensor(0.0, device=device), hypotheses, labels
+    else:
+        # Training mode
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True
+        )
+        
+        # Get loss
+        loss = outputs.loss
+        
+        # Get hypotheses and labels for metrics computation
+        # During training, we don't need to generate, we can use teacher forcing
+        hypotheses = [tokenizer.decode(g, skip_special_tokens=True) for g in input_ids]
+        label_texts = [tokenizer.decode(g, skip_special_tokens=True) for g in labels]
+        
+        return loss, hypotheses, label_texts
+
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune IndoBART-v2 on IndoSUM")
     
@@ -375,14 +562,18 @@ def main():
                         help="Pretrained model name or path")
     parser.add_argument("--output_dir", type=str, default="./checkpoints/indosum", 
                         help="Directory to save model checkpoints")
-    parser.add_argument("--dataset_dir", type=str, default="./dataset/IndoSUM", 
+    parser.add_argument("--dataset_dir", type=str, default="../dataset/indosum", 
                         help="Directory containing IndoSUM dataset")
-    parser.add_argument("--train_file", type=str, default="train_preprocess.json", 
-                        help="Training file name")
-    parser.add_argument("--valid_file", type=str, default="valid_preprocess.json", 
-                        help="Validation file name")
-    parser.add_argument("--test_file", type=str, default="test_preprocess.json", 
-                        help="Test file name")
+    parser.add_argument("--train_dataset_dir", type=str, default="traindataset", 
+                        help="Directory containing training dataset")
+    parser.add_argument("--valid_dataset_dir", type=str, default="devdataset", 
+                        help="Directory containing validation dataset")
+    parser.add_argument("--test_dataset_dir", type=str, default="testdataset", 
+                        help="Directory containing test dataset")
+    parser.add_argument("--source_column", type=str, default="document", 
+                        help="Column name for source documents")
+    parser.add_argument("--target_column", type=str, default="summary", 
+                        help="Column name for target summaries")
     parser.add_argument("--num_epochs", type=int, default=10, 
                         help="Number of training epochs")
     parser.add_argument("--train_batch_size", type=int, default=8, 
@@ -465,52 +656,74 @@ def main():
     logger.info(f"Using device: {device}")
     model.to(device)
     
-    # Create dataset and data loaders
+    # Load datasets
     logger.info("Loading datasets")
-    train_path = os.path.join(args.dataset_dir, args.train_file)
-    valid_path = os.path.join(args.dataset_dir, args.valid_file)
-    test_path = os.path.join(args.dataset_dir, args.test_file)
+    train_dataset_path = os.path.join(args.dataset_dir, args.train_dataset_dir)
+    valid_dataset_path = os.path.join(args.dataset_dir, args.valid_dataset_dir)
+    test_dataset_path = os.path.join(args.dataset_dir, args.test_dataset_dir)
     
-    # Check if dataset exists
-    if not os.path.exists(train_path):
-        raise FileNotFoundError(f"Training file not found at {train_path}")
-    if not os.path.exists(valid_path):
-        raise FileNotFoundError(f"Validation file not found at {valid_path}")
-    if not os.path.exists(test_path):
-        raise FileNotFoundError(f"Test file not found at {test_path}")
+    logger.info(f"Loading training dataset from {train_dataset_path}")
+    train_hf_dataset = load_from_disk(train_dataset_path)
+    logger.info(f"Loading validation dataset from {valid_dataset_path}")
+    valid_hf_dataset = load_from_disk(valid_dataset_path)
+    logger.info(f"Loading test dataset from {test_dataset_path}")
+    test_hf_dataset = load_from_disk(test_dataset_path)
     
-    # Create datasets
-    train_dataset = MachineTranslationDataset(
-        train_path, tokenizer, lowercase=True, no_special_token=False,
-        speaker_1_id=5, speaker_2_id=6, separator_id=4,
-        max_token_length=args.max_seq_length, swap_source_target=False
+    # Print dataset information
+    logger.info(f"Train dataset size: {len(train_hf_dataset)}")
+    logger.info(f"Validation dataset size: {len(valid_hf_dataset)}")
+    logger.info(f"Test dataset size: {len(test_hf_dataset)}")
+    
+    # Create custom datasets
+    train_dataset = IndoSUMDataset(
+        train_hf_dataset, 
+        tokenizer, 
+        source_column=args.source_column, 
+        target_column=args.target_column,
+        max_source_length=args.max_seq_length,
+        max_target_length=args.max_seq_length // 2,  # Target is usually shorter
+        source_lang=args.source_lang,
+        target_lang=args.target_lang
     )
-    valid_dataset = MachineTranslationDataset(
-        valid_path, tokenizer, lowercase=True, no_special_token=False,
-        speaker_1_id=5, speaker_2_id=6, separator_id=4,
-        max_token_length=args.max_seq_length, swap_source_target=False
+    valid_dataset = IndoSUMDataset(
+        valid_hf_dataset, 
+        tokenizer, 
+        source_column=args.source_column, 
+        target_column=args.target_column,
+        max_source_length=args.max_seq_length,
+        max_target_length=args.max_seq_length // 2,
+        source_lang=args.source_lang,
+        target_lang=args.target_lang
     )
-    test_dataset = MachineTranslationDataset(
-        test_path, tokenizer, lowercase=True, no_special_token=False,
-        speaker_1_id=5, speaker_2_id=6, separator_id=4,
-        max_token_length=args.max_seq_length, swap_source_target=False
+    test_dataset = IndoSUMDataset(
+        test_hf_dataset, 
+        tokenizer, 
+        source_column=args.source_column, 
+        target_column=args.target_column,
+        max_source_length=args.max_seq_length,
+        max_target_length=args.max_seq_length // 2,
+        source_lang=args.source_lang,
+        target_lang=args.target_lang
     )
     
     # Create data loaders
-    train_loader = GenerationDataLoader(
-        dataset=train_dataset, model_type='indo-bart', tokenizer=tokenizer, 
-        max_seq_len=args.max_seq_length, batch_size=args.train_batch_size,
-        src_lid_token_id=src_lid, tgt_lid_token_id=tgt_lid, num_workers=4, shuffle=True
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.train_batch_size, 
+        shuffle=True,
+        num_workers=4
     )
-    valid_loader = GenerationDataLoader(
-        dataset=valid_dataset, model_type='indo-bart', tokenizer=tokenizer, 
-        max_seq_len=args.max_seq_length, batch_size=args.valid_batch_size,
-        src_lid_token_id=src_lid, tgt_lid_token_id=tgt_lid, num_workers=4, shuffle=False
+    valid_loader = DataLoader(
+        valid_dataset, 
+        batch_size=args.valid_batch_size, 
+        shuffle=False,
+        num_workers=4
     )
-    test_loader = GenerationDataLoader(
-        dataset=test_dataset, model_type='indo-bart', tokenizer=tokenizer, 
-        max_seq_len=args.max_seq_length, batch_size=args.test_batch_size,
-        src_lid_token_id=src_lid, tgt_lid_token_id=tgt_lid, num_workers=4, shuffle=False
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=args.test_batch_size, 
+        shuffle=False,
+        num_workers=4
     )
     
     # Create optimizer
@@ -535,7 +748,7 @@ def main():
         valid_loader=valid_loader,
         optimizer=optimizer,
         scheduler=scheduler,
-        forward_fn=forward_generation,
+        forward_fn=forward_pass,
         metrics_fn=generation_metrics_fn,
         valid_criterion=args.valid_criterion,
         tokenizer=tokenizer,
@@ -569,7 +782,7 @@ def main():
     # Evaluate on test set
     logger.info("Evaluating on test set")
     test_loss, test_metrics, test_hyp, test_label = evaluate(
-        model, test_loader, forward_generation, generation_metrics_fn, 
+        model, test_loader, forward_pass, generation_metrics_fn, 
         'indo-bart', tokenizer, beam_size=args.beam_size, 
         max_seq_len=args.max_seq_length, is_test=True, device=device
     )
