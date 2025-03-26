@@ -125,7 +125,12 @@ def checkpoint_callback(
         checkpoint_path: Path to save checkpoint to
         metric_value: Value of the validation metric
     """
-    logger.info(f"Saving checkpoint at epoch {epoch+1} with {metric_value:.4f}...")
+    try:
+        logger.info(f"Saving checkpoint at epoch {epoch+1} with {metric_value:.4f}...")
+        torch.save(model.state_dict(), checkpoint_path)
+        logger.info(f"Checkpoint saved to {checkpoint_path}")
+    except Exception as e:
+        logger.error(f"Failed to save checkpoint: {str(e)}")
     
 
 def main() -> None:
@@ -154,50 +159,67 @@ def main() -> None:
     
     # Load tokenizer
     logger.info(f"Loading tokenizer from {args.model_name}")
-    tokenizer = IndoNLGTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir)
-    logger.info(f"Vocabulary size: {len(tokenizer)}")
+    try:
+        tokenizer = IndoNLGTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        logger.info(f"Vocabulary size: {len(tokenizer)}")
+    except Exception as e:
+        logger.error(f"Failed to load tokenizer: {str(e)}")
+        raise RuntimeError(f"Tokenizer loading failed: {str(e)}")
     
     # Load model
     logger.info(f"Loading model from {args.model_name}")
-    model = MBartForConditionalGeneration.from_pretrained(args.model_name, cache_dir=args.cache_dir)
-    model = model.to(device)
-    logger.info(f"Model loaded with {sum(p.numel() for p in model.parameters())} parameters")
+    try:
+        model = MBartForConditionalGeneration.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        model = model.to(device)
+        logger.info(f"Model loaded with {sum(p.numel() for p in model.parameters())} parameters")
+    except Exception as e:
+        logger.error(f"Failed to load model: {str(e)}")
+        raise RuntimeError(f"Model loading failed: {str(e)}")
+    
+    # Validate data directory exists
+    if not os.path.exists(args.data_dir):
+        logger.error(f"Data directory does not exist: {args.data_dir}")
+        raise FileNotFoundError(f"Data directory not found: {args.data_dir}")
     
     # Load datasets
     logger.info("Loading datasets")
-    train_dataset = IndoSUMDataset(
-        data_dir=args.data_dir,
-        split="train",
-        tokenizer=tokenizer,
-        max_source_length=args.max_source_length,
-        max_target_length=args.max_target_length,
-        source_lang="[indonesian]",
-        target_lang="[indonesian]"
-    )
+    try:
+        train_dataset = IndoSUMDataset(
+            data_dir=args.data_dir,
+            split="train",
+            tokenizer=tokenizer,
+            max_source_length=args.max_source_length,
+            max_target_length=args.max_target_length,
+            source_lang="[indonesian]",
+            target_lang="[indonesian]"
+        )
     
-    valid_dataset = IndoSUMDataset(
-        data_dir=args.data_dir,
-        split="dev",
-        tokenizer=tokenizer,
-        max_source_length=args.max_source_length,
-        max_target_length=args.max_target_length,
-        source_lang="[indonesian]",
-        target_lang="[indonesian]"
-    )
+        valid_dataset = IndoSUMDataset(
+            data_dir=args.data_dir,
+            split="dev",
+            tokenizer=tokenizer,
+            max_source_length=args.max_source_length,
+            max_target_length=args.max_target_length,
+            source_lang="[indonesian]",
+            target_lang="[indonesian]"
+        )
     
-    test_dataset = IndoSUMDataset(
-        data_dir=args.data_dir,
-        split="test",
-        tokenizer=tokenizer,
-        max_source_length=args.max_source_length,
-        max_target_length=args.max_target_length,
-        source_lang="[indonesian]",
-        target_lang="[indonesian]"
-    )
-    
-    logger.info(f"Loaded {len(train_dataset)} training examples")
-    logger.info(f"Loaded {len(valid_dataset)} validation examples")
-    logger.info(f"Loaded {len(test_dataset)} test examples")
+        test_dataset = IndoSUMDataset(
+            data_dir=args.data_dir,
+            split="test",
+            tokenizer=tokenizer,
+            max_source_length=args.max_source_length,
+            max_target_length=args.max_target_length,
+            source_lang="[indonesian]",
+            target_lang="[indonesian]"
+        )
+        
+        logger.info(f"Loaded {len(train_dataset)} training examples")
+        logger.info(f"Loaded {len(valid_dataset)} validation examples")
+        logger.info(f"Loaded {len(test_dataset)} test examples")
+    except Exception as e:
+        logger.error(f"Failed to load datasets: {str(e)}")
+        raise RuntimeError(f"Dataset loading failed: {str(e)}")
     
     # Create data loaders
     train_loader = SummarizationDataLoader(
@@ -268,8 +290,13 @@ def main() -> None:
     # Load best model
     best_model_path = os.path.join(args.model_dir, f"best_model_{args.exp_id}.pt")
     if os.path.exists(best_model_path):
-        logger.info(f"Loading best model from {best_model_path}")
-        model.load_state_dict(torch.load(best_model_path))
+        try:
+            logger.info(f"Loading best model from {best_model_path}")
+            model.load_state_dict(torch.load(best_model_path))
+            logger.info("Successfully loaded best model")
+        except Exception as e:
+            logger.error(f"Failed to load best model: {str(e)}")
+            logger.warning("Continuing with current model weights")
     
     # Evaluate model
     logger.info("Evaluating model on test set")
@@ -298,6 +325,10 @@ def main() -> None:
     if args.push_to_hub:
         logger.info("Pushing model to Hugging Face Hub")
         
+        if not args.hub_token:
+            logger.error("Hugging Face Hub token is required when push_to_hub is enabled")
+            raise ValueError("Hugging Face Hub token is required")
+            
         if args.hub_model_id is None:
             args.hub_model_id = f"indobenchmark/indobart-finetuned-indosum-{args.exp_id}"
         
@@ -315,16 +346,24 @@ def main() -> None:
         )
         
         # Push to hub
-        push_to_hub(
-            model=model,
-            tokenizer=tokenizer,
-            repo_id=args.hub_model_id,
-            private=args.hub_private,
-            token=args.hub_token,
-            local_dir=os.path.join(args.model_dir, args.exp_id)
-        )
-        
-        logger.info(f"Model pushed to {args.hub_model_id}")
+        try:
+            push_to_hub(
+                model=model,
+                tokenizer=tokenizer,
+                repo_id=args.hub_model_id,
+                private=args.hub_private,
+                token=args.hub_token,
+                local_dir=os.path.join(args.model_dir, args.exp_id)
+            )
+            logger.info(f"Model successfully pushed to {args.hub_model_id}")
+        except Exception as e:
+            logger.error(f"Failed to push model to Hugging Face Hub: {str(e)}")
+            logger.warning("Model was not pushed to Hub - saving locally instead")
+            save_model_to_disk(
+                model=model,
+                tokenizer=tokenizer,
+                output_dir=os.path.join(args.model_dir, args.exp_id)
+            )
     
     logger.info("Done!")
 

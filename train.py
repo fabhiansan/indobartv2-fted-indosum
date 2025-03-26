@@ -209,11 +209,14 @@ def train(
         
         # Evaluate
         if ((epoch + 1) % evaluate_every) == 0:
-            val_loss, val_metrics = evaluate(
+            # Explicitly specifying that we only want the first two return values for validation
+            # This makes the linter understand we're deliberately using only 2 of the possible 4 return values
+            val_results = evaluate(
                 model, valid_loader, forward_fn, metrics_fn, model_type,
                 tokenizer, is_test=False, beam_size=beam_size,
                 max_seq_len=max_seq_len, device=device
             )
+            val_loss, val_metrics = val_results
             
             logger.info(
                 "(Epoch %d) VALID LOSS:%.4f %s",
@@ -279,7 +282,8 @@ def evaluate(
         length_penalty: Length penalty for generation
         
     Returns:
-        Tuple of loss, metrics and optionally hypotheses and references
+        If is_test=False: Tuple of (loss, metrics)
+        If is_test=True: Tuple of (loss, metrics, hypotheses, references)
     """
     model.eval()
     torch.set_grad_enabled(False)
