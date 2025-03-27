@@ -155,11 +155,14 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.model_dir, exist_ok=True)
     os.makedirs(args.cache_dir, exist_ok=True)
-    
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        logger.info("CUDA is available, using GPU.")
+    else:
+        logger.info("CUDA is not available, using CPU.")
     logger.info(f"Using device: {device}")
-    
+
     # Set experiment ID
     if args.exp_id is None:
         args.exp_id = f"indosum_{args.model_type}_bs{args.batch_size}_lr{args.lr}_seed{args.seed}"
@@ -174,10 +177,31 @@ def main() -> None:
         logger.info(f"  - Cache directory: {args.cache_dir}")
         
         tokenizer = IndoNLGTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        logger.info(f"Tokenizer loaded: {tokenizer.__class__.__name__}")
+        logger.info(f"Tokenizer vocabulary size: {tokenizer.vocab_size if hasattr(tokenizer, 'vocab_size') else 'N/A'}")
+        logger.info(f"Tokenizer special tokens: {tokenizer.all_special_tokens}")
+        logger.info(f"Tokenizer special token ids: {[tokenizer.convert_tokens_to_ids(t) for t in tokenizer.all_special_tokens]}")
+        
+        # Log tokenizer attributes to help debug the 'default tokenizer' message
+        logger.info("Tokenizer Configuration Details:")
+        for attr_name in dir(tokenizer):
+            if not attr_name.startswith('_') and not callable(getattr(tokenizer, attr_name)):
+                try:
+                    attr_value = getattr(tokenizer, attr_name)
+                    if not isinstance(attr_value, (dict, list)) or len(str(attr_value)) < 100:
+                        logger.info(f"  - {attr_name}: {attr_value}")
+                except Exception:
+                    pass
+        
         logger.info(f"Tokenizer successfully loaded")
         logger.info(f"Vocabulary size: {len(tokenizer)}")
         logger.info(f"Tokenizer type: {type(tokenizer).__name__}")
-        
+
+        # Check tokenizer compatibility
+        if not hasattr(tokenizer, 'prepare_input_for_generation'):
+            logger.error("Tokenizer does not have 'prepare_input_for_generation' method. Incompatible tokenizer.")
+            raise ValueError("Incompatible tokenizer: Tokenizer must have 'prepare_input_for_generation' method.")
+
         # Log special tokens
         special_tokens = {
             "Padding token": tokenizer.pad_token,
@@ -189,11 +213,11 @@ def main() -> None:
         for name, token in special_tokens.items():
             if token:
                 logger.info(f"  - {name}: '{token}' (id: {tokenizer.convert_tokens_to_ids(token)})")
-                
+
     except Exception as e:
         logger.error(f"Failed to load tokenizer: {str(e)}")
         raise RuntimeError(f"Tokenizer loading failed: {str(e)}")
-    
+
     # Load model
     logger.info(f"Loading model from {args.model_name}")
     try:

@@ -14,6 +14,7 @@ import gc
 
 # Import custom tokenizer - using relative import since it's within the project
 from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
+from evaluate import evaluate
 
 logger = logging.getLogger(__name__)
 
@@ -238,59 +239,72 @@ def train(
         # Evaluate
         if (epoch + 1) % evaluate_every == 0:
             logger.info(f"[Epoch {epoch+1}] Starting evaluation...")
-            
-            # Fix for tuple unpacking - using is_test=False to get only loss and metrics
+
             result = evaluate(
-                model=model, 
-                data_loader=valid_loader, 
-                forward_fn=forward_fn, 
+                model=model,
+                data_loader=valid_loader,
+                forward_fn=forward_fn,
                 metrics_fn=metrics_fn,
-                model_type=model_type, 
-                tokenizer=tokenizer, 
+                model_type=model_type,
+                tokenizer=tokenizer,
                 beam_size=beam_size,
-                max_seq_len=max_seq_len, 
-                is_test=False,  # Explicitly set is_test to False
-                device=device
+                max_seq_len=max_seq_len,
+                is_test=False,
+                device=device,
+                length_penalty=length_penalty,
             )
-            
-            if len(result) == 2:
+
+            if isinstance(result, tuple) and len(result) == 2:
                 val_loss, val_metrics = result
-            else:
+            elif isinstance(result, tuple) and len(result) == 4:
                 val_loss, val_metrics, _, _ = result
-            
-            history['val_loss'].append(val_loss)
-            history['val_metrics'].append(val_metrics)
-            
+            else:
+                logger.warning(
+                    f"Unexpected return type from evaluate: {type(result)}, length: {len(result) if isinstance(result, (tuple, list)) else 'N/A'}"
+                )
+                val_loss = result[0] if isinstance(result, (tuple, list)) and len(result) > 0 else 0.0
+                val_metrics = result[1] if isinstance(result, (tuple, list)) and len(result) > 1 else {}
+
+            history["val_loss"].append(val_loss)
+            history["val_metrics"].append(val_metrics)
+
             val_metric = val_metrics[valid_criterion]
             logger.info(
-                '[%s] Epoch %d Val loss: %.4f %s' % (
-                    exp_id, epoch+1, val_loss, metrics_to_string(val_metrics)
-                )
+                "[%s] Epoch %d Val loss: %.4f %s"
+                % (exp_id, epoch + 1, val_loss, metrics_to_string(val_metrics))
             )
-            
+
             # Checkpointing
             if val_metric > best_val_metric:
-                logger.info('Validation metric improved from %.4f to %.4f' % (best_val_metric, val_metric))
+                logger.info(
+                    "Validation metric improved from %.4f to %.4f"
+                    % (best_val_metric, val_metric)
+                )
                 best_val_metric = val_metric
-                best_model_path = os.path.join(model_dir, f'best_model_{exp_id}.pt')
-                
+                best_model_path = os.path.join(model_dir, f"best_model_{exp_id}.pt")
+
                 if checkpoint_callback is not None:
                     checkpoint_callback(model, epoch, best_model_path, val_metric)
                 else:
-                    logger.info(f'Saving checkpoint to {best_model_path}')
+                    logger.info(f"Saving checkpoint to {best_model_path}")
                     torch.save(model.state_dict(), best_model_path)
-                
+
                 count_stop = 0
             else:
                 count_stop += 1
-                logger.info('Validation metric did not improve from %.4f, count_stop=%d' % (best_val_metric, count_stop))
-            
+                logger.info(
+                    "Validation metric did not improve from %.4f, count_stop=%d"
+                    % (best_val_metric, count_stop)
+                )
+
             # Early stopping
             if count_stop >= early_stop:
-                logger.info('Early stopping after %d epochs without improvement' % count_stop)
+                logger.info("Early stopping after %d epochs without improvement" % count_stop)
                 break
         else:
-            logger.info(f"[Epoch {epoch+1}] Skipping evaluation since evaluate_every={evaluate_every}")
+            logger.info(
+                f"[Epoch {epoch+1}] Skipping evaluation since evaluate_every={evaluate_every}"
+            )
         
         # Force CUDA synchronization if using GPU
         if device != 'cpu' and torch.cuda.is_available():
@@ -306,82 +320,3 @@ def train(
         logger.info(f"==== Completed epoch {epoch+1}/{n_epochs} ====")
     
     return history
-
-
-def evaluate(
-    model: torch.nn.Module,
-    data_loader: torch.utils.data.DataLoader,
-    forward_fn: Callable,
-    metrics_fn: Callable,
-    model_type: str,
-    tokenizer: IndoNLGTokenizer,
-    beam_size: int = 5,
-    max_seq_len: int = 512,
-    is_test: bool = False,
-    device: str = 'cpu',
-    length_penalty: float = 1.0,
-) -> Union[Tuple[float, Dict[str, float]], Tuple[float, Dict[str, float], List[str], List[str]]]:
-    """
-    Evaluate the model on the given data.
-
-    Args:
-        model: Model to evaluate
-        data_loader: DataLoader for evaluation
-        forward_fn: Function to use for forward pass
-        metrics_fn: Function to compute metrics
-        model_type: Type of model
-        tokenizer: Tokenizer for preprocessing
-        beam_size: Beam size for generation
-        max_seq_len: Maximum sequence length
-        is_test: Whether this is a test evaluation
-        device: Device to use
-        length_penalty: Length penalty for generation
-        
-    Returns:
-        If is_test=False: Tuple of (loss, metrics)
-        If is_test=True: Tuple of (loss, metrics, hypotheses, references)
-    """
-    logger.info("Starting evaluation...")
-    model.eval()
-    torch.set_grad_enabled(False)
-    logger.info(f"Evaluation setup complete - DataLoader has {len(data_loader)} batches")
-    
-    total_loss = 0
-    
-    list_hyp, list_label = [], []
-    
-    logger.info("Creating progress bar...")
-    pbar = tqdm(iter(data_loader), leave=True, total=len(data_loader))
-    logger.info("Progress bar created, starting evaluation loop...")
-    for i, batch_data in enumerate(pbar):
-        loss, batch_hyp, batch_label = forward_fn(
-            model, batch_data, model_type=model_type, tokenizer=tokenizer,
-            device=device, is_inference=is_test, is_test=is_test,
-            skip_special_tokens=True, beam_size=beam_size,
-            max_seq_len=max_seq_len, length_penalty=length_penalty
-        )
-        
-        # Calculate evaluation metrics
-        list_hyp += batch_hyp
-        list_label += batch_label
-        
-        if not is_test:
-            # Calculate total loss for validation
-            test_loss = loss.item()
-            total_loss = total_loss + test_loss
-            
-            pbar.set_description("VALID LOSS:%.4f" % (total_loss/(i+1)))
-        else:
-            pbar.set_description("TESTING... ")
-    
-    metrics = metrics_fn(list_hyp, list_label)
-    
-    # Store i value in case the loop is empty
-    i_value = max(0, i) if 'i' in locals() else 0
-    
-    if is_test:
-        # Return 4 values for test mode
-        return total_loss/(i_value+1), metrics, list_hyp, list_label
-    else:
-        # Return only 2 values for validation mode
-        return total_loss/(i_value+1), metrics

@@ -71,6 +71,11 @@ class IndoSUMDataset(Dataset):
             raise ValueError(f"Split {split} not recognized. Must be one of {list(split_map.keys())}.")
         
         dataset_path = os.path.join(data_dir, split_map[split])
+
+        # Check if the dataset directory exists
+        if not os.path.exists(dataset_path):
+            logger.error(f"Dataset directory does not exist: {dataset_path}")
+            raise FileNotFoundError(f"Dataset directory not found: {dataset_path}")
         
         logger.info(f"Loading IndoSUM dataset from {dataset_path}")
         try:
@@ -79,7 +84,7 @@ class IndoSUMDataset(Dataset):
         except Exception as e:
             logger.error(f"Failed to load dataset: {e}")
             raise
-        
+
         # Log dataset information
         logger.info(f"Dataset columns: {self.dataset.column_names}")
     

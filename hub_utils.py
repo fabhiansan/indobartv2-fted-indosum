@@ -103,11 +103,14 @@ def create_model_card(
     license_name: str = "MIT",
     finetuned_from: str = "indobenchmark/indobart",
     tasks: List[str] = ["summarization"],
-    output_file: str = "README.md"
+    output_file: str = "README.md",
+    training_data: str = "IndoSUM dataset",
+    training_procedure: str = "Fine-tuning with a denoising auto-encoding objective",
+    intended_use: str = "Indonesian text summarization"
 ) -> str:
     """
     Create a model card for the Hugging Face Hub.
-    
+
     Args:
         repo_id: Repository ID
         metrics: Dictionary of metrics
@@ -118,6 +121,9 @@ def create_model_card(
         finetuned_from: Model this was fine-tuned from
         tasks: List of tasks the model performs
         output_file: Output file to save to
+        training_data: Description of the training data
+        training_procedure: Description of the training procedure
+        intended_use: Description of the intended use
         
     Returns:
         Markdown string of the model card
@@ -126,7 +132,7 @@ def create_model_card(
     metrics_table = "| Metric | Value |\n| ------ | ----- |\n"
     for name, value in metrics.items():
         metrics_table += f"| {name} | {value:.2f} |\n"
-    
+
     # Create citation with URL
     citation = f"""@misc{{indobart-indosum,
   author = {{{{IndoNLP Team}}}},
@@ -135,7 +141,7 @@ def create_model_card(
   publisher = {{Hugging Face}},
   howpublished = {{\\\\url{{https://huggingface.co/{repo_id}}}}}
 }}"""
-    
+
     # Create model card content
     model_card = f"""---
 language: {language.lower()}
@@ -150,6 +156,7 @@ datasets:
 metrics:
 - rouge
 - bleu
+- bertscore
 model-index:
 - name: {model_name} fine-tuned on {dataset_name}
   results:
@@ -172,11 +179,11 @@ It achieves the following results on the evaluation set:
 
 ## Model Description
 
-This model was trained on the {dataset_name} dataset for {language} text summarization. It's based on the {model_name} model, which is a {language} language model pre-trained with a denoising auto-encoding objective.
+This model was trained on the {training_data} for {language} text summarization. It's based on the {model_name} model, which is a {language} language model pre-trained with a denoising auto-encoding objective. The model was fine-tuned using {training_procedure}.
 
 ## Intended Use and Limitations
 
-This model is intended to be used for {language} text summarization. It may not perform well on other languages or tasks.
+This model is intended to be used for {intended_use}. It may not perform well on other languages or tasks.
 
 ## Training and Evaluation Data
 
@@ -226,10 +233,10 @@ print(summary)
 {citation}
 ```
 """
-    
+
     # Write model card to file if requested
     if output_file:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(model_card)
-    
+
     return model_card

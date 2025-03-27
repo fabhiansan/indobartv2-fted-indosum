@@ -2,6 +2,7 @@
 Evaluation functionality for IndoBART fine-tuned on the IndoSUM dataset.
 """
 from typing import Dict, List, Optional, Tuple, Union, Any, Callable
+import time
 
 import os
 import torch
@@ -18,6 +19,7 @@ from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
 from rouge_score import rouge_scorer
 import sacrebleu
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from bert_score import score
 
 logger = logging.getLogger(__name__)
 
@@ -137,14 +139,23 @@ def generation_metrics_fn(hypotheses: List[str], references: List[str]) -> Dict[
     
     # Compute ROUGE scores
     rouge_scores = compute_rouge_scores(hypotheses, references)
-    
+
+    # Compute BERTScore
+    P, R, F1 = score(hypotheses, references, lang="id", verbose=True)
+    bertscore_f1 = F1.mean().item()
+    bertscore_precision = P.mean().item()
+    bertscore_recall = R.mean().item()
+
     # Combine all metrics
     metrics = {
         'BLEU': bleu,
         'SacreBLEU': sacrebleu_score,
-        **rouge_scores
+        **rouge_scores,
+        'BERTScore_F1': bertscore_f1,
+        'BERTScore_Precision': bertscore_precision,
+        'BERTScore_Recall': bertscore_recall,
     }
-    
+
     return metrics
 
 
@@ -180,53 +191,31 @@ def forward_generation(
     Returns:
         Tuple of loss, hypotheses, and references
     """
+    start_time = time.time()
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Forward generation started (is_inference={is_inference}, is_test={is_test})")
+    
     input_ids, attention_mask, labels, source_texts, target_texts = batch_data
     
+    # Log batch size and sequence length
+    batch_size = input_ids.size(0)
+    seq_length = input_ids.size(1)
+    logger.info(f"Batch size: {batch_size}, Sequence length: {seq_length}")
+    
+    # Move tensors to device
+    tensor_start = time.time()
     input_ids = input_ids.to(device)
     attention_mask = attention_mask.to(device)
     labels = labels.to(device)
+    logger.info(f"Moving tensors to device took {time.time() - tensor_start:.2f}s")
     
     if is_inference:
         # Generate tokens
-        generated_ids = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=max_seq_len,
-            num_beams=beam_size,
-            length_penalty=length_penalty,
-            early_stopping=True,
-            use_cache=True,
-            no_repeat_ngram_size=3
-        )
+        logger.info(f"[{time.strftime('%H:%M:%S')}] Starting token generation with beam_size={beam_size}")
+        if torch.cuda.is_available():
+            logger.info(f"GPU memory before generation: {torch.cuda.memory_allocated()/1e9:.2f} GB")
         
-        # Convert generated tokens to text
-        generated_texts = []
-        for gen_ids in generated_ids:
-            gen_text = tokenizer.decode(gen_ids, skip_special_tokens=skip_special_tokens)
-            generated_texts.append(gen_text)
-        
-        # Compute loss (even for inference to track progress)
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            return_dict=True
-        )
-        loss = outputs.loss
-        
-        return loss, generated_texts, target_texts
-    else:
-        # Training or validation
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            return_dict=True
-        )
-        loss = outputs.loss
-        
-        if is_test:
-            # Generate tokens
+        gen_start = time.time()
+        try:
             generated_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -237,16 +226,78 @@ def forward_generation(
                 use_cache=True,
                 no_repeat_ngram_size=3
             )
+            gen_time = time.time() - gen_start
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Generation completed in {gen_time:.2f}s ({gen_time/batch_size:.2f}s per example)")
+        except Exception as e:
+            logger.error(f"Error during generation: {str(e)}")
+            logger.exception("Exception details:")
+            raise
+        
+        if torch.cuda.is_available():
+            logger.info(f"GPU memory after generation: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+        
+        # Convert generated tokens to text
+        decode_start = time.time()
+        generated_texts = []
+        for gen_ids in generated_ids:
+            gen_text = tokenizer.decode(gen_ids, skip_special_tokens=skip_special_tokens)
+            generated_texts.append(gen_text)
+        logger.info(f"Decoding took {time.time() - decode_start:.2f}s")
+        
+        # Compute loss (even for inference to track progress)
+        loss_start = time.time()
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True
+        )
+        loss = outputs.loss
+        logger.info(f"Loss computation took {time.time() - loss_start:.2f}s")
+        
+        logger.info(f"[{time.strftime('%H:%M:%S')}] Forward generation completed in {time.time() - start_time:.2f}s")
+        return loss, generated_texts, target_texts
+    else:
+        # Training or validation
+        loss_start = time.time()
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True
+        )
+        loss = outputs.loss
+        logger.info(f"Loss computation took {time.time() - loss_start:.2f}s")
+        
+        if is_test:
+            # Generate tokens
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Starting token generation for test")
+            gen_start = time.time()
+            generated_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=max_seq_len,
+                num_beams=beam_size,
+                length_penalty=length_penalty,
+                early_stopping=True,
+                use_cache=True,
+                no_repeat_ngram_size=3
+            )
+            logger.info(f"Generation took {time.time() - gen_start:.2f}s")
             
             # Convert generated tokens to text
+            decode_start = time.time()
             generated_texts = []
             for gen_ids in generated_ids:
                 gen_text = tokenizer.decode(gen_ids, skip_special_tokens=skip_special_tokens)
                 generated_texts.append(gen_text)
+            logger.info(f"Decoding took {time.time() - decode_start:.2f}s")
             
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Forward generation for test completed in {time.time() - start_time:.2f}s")
             return loss, generated_texts, target_texts
         else:
             # Return original texts for training
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Forward pass for training completed in {time.time() - start_time:.2f}s")
             return loss, source_texts, target_texts
 
 
@@ -283,39 +334,112 @@ def evaluate(
         If is_test=False: Tuple of (loss, metrics)
         If is_test=True: Tuple of (loss, metrics, hypotheses, references)
     """
+    logger.info(f"Beginning evaluation with model_type={model_type}, beam_size={beam_size}, max_seq_len={max_seq_len}")
+    logger.info(f"Tokenizer details: {tokenizer.__class__.__name__}, vocab_size={tokenizer.vocab_size if hasattr(tokenizer, 'vocab_size') else 'N/A'}")
+    
     model.eval()
     torch.set_grad_enabled(False)
+    
+    if torch.cuda.is_available():
+        logger.info(f"GPU memory before evaluation: {torch.cuda.memory_allocated()/1e9:.2f} GB")
     
     total_loss = 0
     list_hyp = []
     list_label = []
     
-    logger.info("Progress bar created, starting evaluation loop...")
+    start_time = time.time()
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Progress bar created, starting evaluation loop...")
     pbar = tqdm(iter(data_loader), leave=True, total=len(data_loader))
     
     for i, batch_data in enumerate(pbar):
-        loss, batch_hyp, batch_label = forward_fn(
-            model, batch_data, model_type=model_type, tokenizer=tokenizer,
-            is_inference=True, device=device, skip_special_tokens=True,
-            beam_size=beam_size, max_seq_len=max_seq_len, length_penalty=length_penalty
-        )
+        # Log every 500 batches or at 25%, 50%, 75% points
+        should_log = (i % 500 == 0) or any(i == int(len(data_loader) * p) for p in [0.25, 0.5, 0.75])
+        if should_log:
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Processing batch {i}/{len(data_loader)} ({i/len(data_loader)*100:.1f}%)")
+            if torch.cuda.is_available():
+                logger.info(f"GPU memory during evaluation: {torch.cuda.memory_allocated()/1e9:.2f} GB")
         
-        val_loss = loss.item()
-        total_loss = total_loss + val_loss
-        
-        # Store hypotheses and references
-        list_hyp += batch_hyp
-        list_label += batch_label
-        
-        pbar.set_description("VALID LOSS:%.4f" % (total_loss/(i+1)))
+        try:
+            batch_start = time.time()
+            loss, batch_hyp, batch_label = forward_fn(
+                model, batch_data, model_type=model_type, tokenizer=tokenizer,
+                is_inference=True, device=device, skip_special_tokens=True,
+                beam_size=beam_size, max_seq_len=max_seq_len, length_penalty=length_penalty
+            )
+            
+            if should_log and i > 0:
+                batch_time = time.time() - batch_start
+                estimated_remaining = batch_time * (len(data_loader) - i)
+                logger.info(f"Batch processing time: {batch_time:.2f}s, Estimated remaining: {estimated_remaining/60:.2f} minutes")
+            
+            val_loss = loss.item()
+            total_loss = total_loss + val_loss
+            
+            # Store hypotheses and references
+            list_hyp += batch_hyp
+            list_label += batch_label
+            
+            pbar.set_description("VALID LOSS:%.4f" % (total_loss/(i+1)))
+        except Exception as e:
+            logger.error(f"Error processing batch {i}: {str(e)}")
+            logger.exception("Exception details:")
+    
+    eval_time = time.time() - start_time
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Evaluation loop completed in {eval_time:.2f}s ({eval_time/60:.2f} minutes)")
     
     # Calculate metrics
-    metrics = metrics_fn(list_hyp, list_label)
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Starting metrics calculation for {len(list_hyp)} examples...")
+    metrics_start = time.time()
+    
+    # Log sample predictions for debugging
+    for i in range(min(3, len(list_hyp))):
+        logger.info(f"Sample {i}: \nReference: {list_label[i][:100]}... \nHypothesis: {list_hyp[i][:100]}...")
+    
+    if torch.cuda.is_available():
+        logger.info(f"GPU memory before metrics calculation: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+        
+    try:
+        # Calculate BLEU first and log
+        logger.info(f"[{time.strftime('%H:%M:%S')}] Calculating BLEU score...")
+        bleu_start = time.time()
+        bleu = compute_bleu_score(list_hyp, list_label)
+        logger.info(f"BLEU calculation took {time.time() - bleu_start:.2f}s, Score: {bleu:.2f}")
+        
+        # Then SacreBLEU
+        logger.info(f"[{time.strftime('%H:%M:%S')}] Calculating SacreBLEU score...")
+        sacrebleu_start = time.time()
+        sacrebleu_score = compute_sacrebleu_score(list_hyp, list_label)
+        logger.info(f"SacreBLEU calculation took {time.time() - sacrebleu_start:.2f}s, Score: {sacrebleu_score:.2f}")
+        
+        # Finally ROUGE scores
+        logger.info(f"[{time.strftime('%H:%M:%S')}] Calculating ROUGE scores...")
+        rouge_start = time.time()
+        rouge_scores = compute_rouge_scores(list_hyp, list_label)
+        logger.info(f"ROUGE calculation took {time.time() - rouge_start:.2f}s, Scores: {rouge_scores}")
+        
+        # Combine all metrics
+        metrics = {
+            'BLEU': bleu,
+            'SacreBLEU': sacrebleu_score,
+            **rouge_scores
+        }
+    except Exception as e:
+        logger.error(f"Error calculating metrics: {str(e)}")
+        logger.exception("Exception details:")
+        metrics = {'ERROR': str(e)}
+    
+    metrics_time = time.time() - metrics_start
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Metrics calculation completed in {metrics_time:.2f}s ({metrics_time/60:.2f} minutes)")
     
     # Calculate average loss
     avg_loss = total_loss / len(data_loader)
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Final average loss: {avg_loss:.4f}")
+    
+    if torch.cuda.is_available():
+        logger.info(f"GPU memory after evaluation: {torch.cuda.memory_allocated()/1e9:.2f} GB")
     
     # Return results
+    logger.info(f"[{time.strftime('%H:%M:%S')}] Returning results from evaluate function")
     if is_test:
         return avg_loss, metrics, list_hyp, list_label
     else:
