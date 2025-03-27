@@ -104,7 +104,7 @@ def create_model_card(
     finetuned_from: str = "indobenchmark/indobart",
     tasks: List[str] = ["summarization"],
     output_file: str = "README.md",
-    training_data: str = "IndoSUM dataset",
+    training_data: str = "Fine-tuned on the IndoSUM dataset",
     training_procedure: str = "Fine-tuning with a denoising auto-encoding objective",
     intended_use: str = "Indonesian text summarization"
 ) -> str:
@@ -179,7 +179,7 @@ It achieves the following results on the evaluation set:
 
 ## Model Description
 
-This model was trained on the {training_data} for {language} text summarization. It's based on the {model_name} model, which is a {language} language model pre-trained with a denoising auto-encoding objective. The model was fine-tuned using {training_procedure}.
+This model was {training_data} for {language} text summarization. It's based on the {model_name} model, which is a {language} language model pre-trained with a denoising auto-encoding objective. The model was fine-tuned using {training_procedure}.
 
 ## Intended Use and Limitations
 

@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     # Training arguments
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
-    parser.add_argument("--batch_size", type=int, default=16,
+    parser.add_argument("--batch_size", type=int, default=64,
                         help="Batch size")
     parser.add_argument("--grad_accum", type=int, default=1,
                         help="Gradient accumulation steps")
@@ -340,6 +340,7 @@ def main() -> None:
         fp16=args.fp16,
         device=device,
         checkpoint_callback=checkpoint_callback,
+        length_penalty=args.length_penalty,
     )
     
     # Load best model

@@ -87,6 +87,7 @@ def train(
     fp16: bool = False,
     device: str = 'cpu',
     checkpoint_callback: Optional[Callable] = None,
+    length_penalty: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Train the model with improved checkpointing and interruption handling.
