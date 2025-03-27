@@ -20,6 +20,7 @@ from hub_utils import save_model_to_disk, push_to_hub, create_model_card
 # Import transformers
 from transformers import MBartForConditionalGeneration
 from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
+import transformers
 
 # Configure logging
 logging.basicConfig(
@@ -30,6 +31,9 @@ logging.basicConfig(
         logging.FileHandler('training.log')
     ]
 )
+
+# Set transformers logging level to INFO to see more details
+transformers.logging.set_verbosity_info()
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,10 @@ def parse_args() -> argparse.Namespace:
                         help="Length penalty for generation")
     parser.add_argument("--fp16", action="store_true",
                         help="Use FP16 precision")
+    
+    # Dataloader arguments
+    parser.add_argument("--num_workers", type=int, default=2,
+                        help="Number of workers for dataloaders")
     
     # Hugging Face Hub arguments
     parser.add_argument("--push_to_hub", action="store_true",
@@ -160,8 +168,28 @@ def main() -> None:
     # Load tokenizer
     logger.info(f"Loading tokenizer from {args.model_name}")
     try:
+        # Add more detailed logging for tokenizer initialization
+        logger.info("Tokenizer initialization details:")
+        logger.info(f"  - Model name: {args.model_name}")
+        logger.info(f"  - Cache directory: {args.cache_dir}")
+        
         tokenizer = IndoNLGTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        logger.info(f"Tokenizer successfully loaded")
         logger.info(f"Vocabulary size: {len(tokenizer)}")
+        logger.info(f"Tokenizer type: {type(tokenizer).__name__}")
+        
+        # Log special tokens
+        special_tokens = {
+            "Padding token": tokenizer.pad_token,
+            "Unknown token": tokenizer.unk_token,
+            "SOS/BOS token": tokenizer.bos_token,
+            "EOS token": tokenizer.eos_token
+        }
+        logger.info("Special tokens:")
+        for name, token in special_tokens.items():
+            if token:
+                logger.info(f"  - {name}: '{token}' (id: {tokenizer.convert_tokens_to_ids(token)})")
+                
     except Exception as e:
         logger.error(f"Failed to load tokenizer: {str(e)}")
         raise RuntimeError(f"Tokenizer loading failed: {str(e)}")
@@ -222,6 +250,9 @@ def main() -> None:
         raise RuntimeError(f"Dataset loading failed: {str(e)}")
     
     # Create data loaders
+    logger.info("Creating data loaders")
+    
+    # Use the num_workers from args
     train_loader = SummarizationDataLoader(
         dataset=train_dataset,
         model_type=args.model_type,
@@ -229,7 +260,7 @@ def main() -> None:
         max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4
+        num_workers=args.num_workers
     )
     
     valid_loader = SummarizationDataLoader(
@@ -239,7 +270,7 @@ def main() -> None:
         max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4
+        num_workers=args.num_workers
     )
     
     test_loader = SummarizationDataLoader(
@@ -249,7 +280,7 @@ def main() -> None:
         max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4
+        num_workers=args.num_workers
     )
     
     # Create optimizer

@@ -10,6 +10,7 @@ import random
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 import logging
+import gc
 
 # Import custom tokenizer - using relative import since it's within the project
 from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
@@ -143,6 +144,14 @@ def train(
     logger.info("Starting training...")
     
     for epoch in range(n_epochs):
+        # Log memory usage at the start of each epoch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info(f"[Epoch {epoch+1}] GPU memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+            logger.info(f"[Epoch {epoch+1}] GPU memory reserved: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+        
+        logger.info(f"==== Starting epoch {epoch+1}/{n_epochs} ====")
+        
         model.train()
         torch.set_grad_enabled(True)
         
@@ -150,7 +159,14 @@ def train(
         list_hyp, list_label = [], []
         
         train_pbar = tqdm(iter(train_loader), leave=True, total=len(train_loader))
+        
+        # Log batch count before starting
+        logger.info(f"[Epoch {epoch+1}] Processing {len(train_loader)} batches")
+        
         for i, batch_data in enumerate(train_pbar):
+            if i == 0:
+                logger.info(f"[Epoch {epoch+1}] First batch loaded successfully")
+                
             if fp16:
                 with torch.cuda.amp.autocast():
                     loss, batch_hyp, batch_label = forward_fn(
@@ -196,64 +212,98 @@ def train(
             if (i + 1) % grad_accum == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+                
+            # Periodically log progress during epoch
+            if (i + 1) % 50 == 0:
+                logger.info(f"[Epoch {epoch+1}] Processed {i+1}/{len(train_loader)} batches, current loss: {tr_loss:.4f}")
         
         # Compute training metrics
         metrics = metrics_fn(list_hyp, list_label)
         
-        logger.info(
-            "(Epoch %d) TRAIN LOSS:%.4f %s LR:%.8f",
-            epoch+1, total_train_loss/(i+1), metrics_to_string(metrics), current_lr
-        )
-        
-        # Store training history
-        history['train_loss'].append(total_train_loss / (i + 1))
+        train_loss = total_train_loss / len(train_loader)
+        history['train_loss'].append(train_loss)
         history['train_metrics'].append(metrics)
         history['learning_rates'].append(current_lr)
         
-        # Decay Learning Rate
-        scheduler.step()
+        logger.info(
+            '[%s] Epoch %d Train loss: %.4f %s' % (
+                exp_id, epoch+1, train_loss, metrics_to_string(metrics)
+            )
+        )
+        
+        # Log memory usage after training
+        if torch.cuda.is_available():
+            logger.info(f"[Epoch {epoch+1}] GPU memory after training: {torch.cuda.memory_allocated()/1e9:.2f} GB")
         
         # Evaluate
-        if ((epoch + 1) % evaluate_every) == 0:
-            # Explicitly specifying that we only want the first two return values for validation
-            # This makes the linter understand we're deliberately using only 2 of the possible 4 return values
-            val_results = evaluate(
-                model, valid_loader, forward_fn, metrics_fn, model_type,
-                tokenizer, is_test=False, beam_size=beam_size,
-                max_seq_len=max_seq_len, device=device
-            )
-            val_loss, val_metrics = val_results
+        if (epoch + 1) % evaluate_every == 0:
+            logger.info(f"[Epoch {epoch+1}] Starting evaluation...")
             
-            logger.info(
-                "(Epoch %d) VALID LOSS:%.4f %s",
-                epoch+1, val_loss, metrics_to_string(val_metrics)
+            # Fix for tuple unpacking - using is_test=False to get only loss and metrics
+            result = evaluate(
+                model=model, 
+                data_loader=valid_loader, 
+                forward_fn=forward_fn, 
+                metrics_fn=metrics_fn,
+                model_type=model_type, 
+                tokenizer=tokenizer, 
+                beam_size=beam_size,
+                max_seq_len=max_seq_len, 
+                is_test=False,  # Explicitly set is_test to False
+                device=device
             )
             
-            # Store validation history
+            if len(result) == 2:
+                val_loss, val_metrics = result
+            else:
+                val_loss, val_metrics, _, _ = result
+            
             history['val_loss'].append(val_loss)
             history['val_metrics'].append(val_metrics)
             
-            # Early stopping
             val_metric = val_metrics[valid_criterion]
-            if best_val_metric < val_metric:
+            logger.info(
+                '[%s] Epoch %d Val loss: %.4f %s' % (
+                    exp_id, epoch+1, val_loss, metrics_to_string(val_metrics)
+                )
+            )
+            
+            # Checkpointing
+            if val_metric > best_val_metric:
+                logger.info('Validation metric improved from %.4f to %.4f' % (best_val_metric, val_metric))
                 best_val_metric = val_metric
-                # Save model
-                if exp_id is not None:
-                    checkpoint_path = os.path.join(model_dir, f"best_model_{exp_id}.pt")
+                best_model_path = os.path.join(model_dir, f'best_model_{exp_id}.pt')
+                
+                if checkpoint_callback is not None:
+                    checkpoint_callback(model, epoch, best_model_path, val_metric)
                 else:
-                    checkpoint_path = os.path.join(model_dir, "best_model.pt")
+                    logger.info(f'Saving checkpoint to {best_model_path}')
+                    torch.save(model.state_dict(), best_model_path)
                 
-                torch.save(model.state_dict(), checkpoint_path)
                 count_stop = 0
-                
-                if checkpoint_callback:
-                    checkpoint_callback(model, epoch, checkpoint_path, val_metric)
             else:
                 count_stop += 1
-                logger.info("count stop: %d", count_stop)
-                if count_stop == early_stop:
-                    logger.info("Early stopping triggered after %d epochs", epoch+1)
-                    break
+                logger.info('Validation metric did not improve from %.4f, count_stop=%d' % (best_val_metric, count_stop))
+            
+            # Early stopping
+            if count_stop >= early_stop:
+                logger.info('Early stopping after %d epochs without improvement' % count_stop)
+                break
+        else:
+            logger.info(f"[Epoch {epoch+1}] Skipping evaluation since evaluate_every={evaluate_every}")
+        
+        # Force CUDA synchronization if using GPU
+        if device != 'cpu' and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            logger.info(f"[Epoch {epoch+1}] CUDA synchronized")
+        
+        # Update learning rate
+        scheduler.step()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        logger.info(f"==== Completed epoch {epoch+1}/{n_epochs} ====")
     
     return history
 

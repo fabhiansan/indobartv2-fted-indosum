@@ -97,52 +97,56 @@ class IndoSUMDataset(Dataset):
         Returns:
             Dictionary containing input_ids, attention_mask, and labels
         """
-        example = self.dataset[idx]
-        
-        # Get source and target text
-        source_text = example['article']
-        target_text = example['summary']
-        
-        # Apply preprocessing
-        if self.lowercase:
-            source_text = source_text.lower()
-            target_text = target_text.lower()
-        
-        # Swap source and target if needed
-        if self.swap_source_target:
-            source_text, target_text = target_text, source_text
-        
-        # Encode the source text
-        source_encoded = self.tokenizer.prepare_input_for_generation(
-            [source_text],
-            return_tensors='pt',
-            lang_token=self.source_lang,
-            decoder_lang_token=self.target_lang,
-            max_length=self.max_source_length,
-            truncation=True,
-        )
-        
-        # Encode the target text
-        target_encoding = self.tokenizer(
-            target_text,
-            max_length=self.max_target_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        
-        # Get the encoded ids
-        input_ids = source_encoded["input_ids"].squeeze(0)
-        attention_mask = source_encoded["attention_mask"].squeeze(0)
-        labels = target_encoding["input_ids"].squeeze(0)
-        
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-            "source_text": source_text,
-            "target_text": target_text,
-        }
+        try:
+            example = self.dataset[idx]
+            
+            # Get source and target text
+            source_text = example['article']
+            target_text = example['summary']
+            
+            # Apply preprocessing
+            if self.lowercase:
+                source_text = source_text.lower()
+                target_text = target_text.lower()
+            
+            # Swap source and target if needed
+            if self.swap_source_target:
+                source_text, target_text = target_text, source_text
+            
+            # Encode the source text
+            source_encoded = self.tokenizer.prepare_input_for_generation(
+                [source_text],
+                return_tensors='pt',
+                lang_token=self.source_lang,
+                decoder_lang_token=self.target_lang,
+                max_length=self.max_source_length,
+                truncation=True,
+            )
+            
+            # Encode the target text
+            target_encoding = self.tokenizer(
+                target_text,
+                max_length=self.max_target_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            
+            # Get the encoded ids
+            input_ids = source_encoded["input_ids"].squeeze(0)
+            attention_mask = source_encoded["attention_mask"].squeeze(0)
+            labels = target_encoding["input_ids"].squeeze(0)
+            
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "source_text": source_text,
+                "target_text": target_text,
+            }
+        except Exception as e:
+            logger.error(f"Error processing example at index {idx}: {str(e)}")
+            raise
 
 
 class SummarizationDataLoader(DataLoader):
@@ -162,7 +166,7 @@ class SummarizationDataLoader(DataLoader):
         batch_size: int = 8,
         src_lid_token_id: int = -1,
         tgt_lid_token_id: int = -1,
-        num_workers: int = 8,
+        num_workers: int = 2,  
         shuffle: bool = True,
     ):
         """
@@ -186,13 +190,20 @@ class SummarizationDataLoader(DataLoader):
         self.src_lid_token_id = src_lid_token_id
         self.tgt_lid_token_id = tgt_lid_token_id
         
+        logger.info(f"Initializing SummarizationDataLoader with {num_workers} workers")
+        
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             collate_fn=self._collate_fn,
+            timeout=60,  
+            pin_memory=torch.cuda.is_available(),  
+            prefetch_factor=2 if num_workers > 0 else None,  
         )
+        
+        logger.info(f"SummarizationDataLoader initialized with {len(dataset)} examples")
     
     def _collate_fn(self, examples: List[Dict[str, torch.Tensor]]) -> Tuple:
         """
@@ -202,15 +213,22 @@ class SummarizationDataLoader(DataLoader):
             examples: List of examples to collate
             
         Returns:
-            Tuple of batch inputs
+            Tuple of tensors for input_ids, attention_mask, and labels
         """
-        # Extract tensors from examples
-        input_ids = torch.stack([ex["input_ids"] for ex in examples])
-        attention_mask = torch.stack([ex["attention_mask"] for ex in examples])
-        labels = torch.stack([ex["labels"] for ex in examples])
-        
-        # Extract text for evaluation
-        source_texts = [ex["source_text"] for ex in examples]
-        target_texts = [ex["target_text"] for ex in examples]
-        
-        return input_ids, attention_mask, labels, source_texts, target_texts
+        try:
+            # Stack input_ids, attention_mask, and labels
+            input_ids = torch.stack([ex['input_ids'] for ex in examples])
+            attention_mask = torch.stack([ex['attention_mask'] for ex in examples])
+            labels = torch.stack([ex['labels'] for ex in examples])
+            
+            # Get source and target text
+            source_text = [ex['source_text'] for ex in examples]
+            target_text = [ex['target_text'] for ex in examples]
+            
+            return (input_ids, attention_mask, labels, source_text, target_text)
+        except Exception as e:
+            # Log detailed information about the exception and examples
+            logger.error(f"Error in _collate_fn: {str(e)}")
+            for i, ex in enumerate(examples):
+                logger.error(f"Example {i} keys: {ex.keys()}")
+            raise
