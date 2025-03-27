@@ -87,7 +87,7 @@ def train(
     checkpoint_callback: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     """
-    Train the model.
+    Train the model with improved checkpointing and interruption handling.
     
     Args:
         model: Model to train
@@ -115,7 +115,13 @@ def train(
         checkpoint_callback: Callback for checkpoint saving
         
     Returns:
-        Dictionary of training history
+        Dictionary of training history with keys:
+        - train_loss: List of training losses per epoch
+        - train_metrics: List of training metrics per epoch
+        - val_loss: List of validation losses per epoch
+        - val_metrics: List of validation metrics per epoch
+        - learning_rates: List of learning rates per epoch
+        - checkpoints: List of saved checkpoint paths
     """
     scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
     

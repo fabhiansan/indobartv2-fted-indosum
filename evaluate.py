@@ -68,8 +68,9 @@ def compute_sacrebleu_score(hypotheses: List[str], references: List[str]) -> flo
     # Format references for sacrebleu
     refs = [references]  # sacrebleu expects a list of lists
     
-    # Compute score
-    bleu = sacrebleu.corpus_bleu(hypotheses, refs)
+    # Compute score with force=True to suppress tokenization warnings
+    # since we're handling tokenization separately in the tokenizer
+    bleu = sacrebleu.corpus_bleu(hypotheses, refs, force=True)
     
     return bleu.score
 
