@@ -101,19 +101,19 @@ def compute_rouge_scores(hypotheses: List[str], references: List[str]) -> Dict[s
     }
     
     for hyp, ref in zip(hypotheses, references):
-        if not hyp.strip() or not ref.strip():
-            continue
-            
+        # Calculate scores for this pair
         score = scorer.score(ref, hyp)
+        
+        # Add precision scores
         scores['ROUGE1'] += score['rouge1'].fmeasure
         scores['ROUGE2'] += score['rouge2'].fmeasure
         scores['ROUGEL'] += score['rougeL'].fmeasure
         scores['ROUGELsum'] += score['rougeLsum'].fmeasure
     
-    # Average the scores
-    n = len(hypotheses)
+    # Calculate averages
+    num_pairs = len(hypotheses)
     for key in scores:
-        scores[key] = (scores[key] / n) * 100
+        scores[key] = (scores[key] / num_pairs) * 100
     
     return scores
 
@@ -129,17 +129,21 @@ def generation_metrics_fn(hypotheses: List[str], references: List[str]) -> Dict[
     Returns:
         Dictionary of all metrics
     """
-    metrics = {}
-    
     # Compute BLEU score
-    metrics['BLEU'] = compute_bleu_score(hypotheses, references)
+    bleu = compute_bleu_score(hypotheses, references)
     
     # Compute SacreBLEU score
-    metrics['SacreBLEU'] = compute_sacrebleu_score(hypotheses, references)
+    sacrebleu_score = compute_sacrebleu_score(hypotheses, references)
     
     # Compute ROUGE scores
     rouge_scores = compute_rouge_scores(hypotheses, references)
-    metrics.update(rouge_scores)
+    
+    # Combine all metrics
+    metrics = {
+        'BLEU': bleu,
+        'SacreBLEU': sacrebleu_score,
+        **rouge_scores
+    }
     
     return metrics
 
@@ -246,6 +250,78 @@ def forward_generation(
             return loss, source_texts, target_texts
 
 
+def evaluate(
+    model: torch.nn.Module,
+    data_loader: torch.utils.data.DataLoader,
+    forward_fn: Callable,
+    metrics_fn: Callable,
+    model_type: str,
+    tokenizer: IndoNLGTokenizer,
+    beam_size: int = 5,
+    max_seq_len: int = 512,
+    is_test: bool = False,
+    device: str = 'cpu',
+    length_penalty: float = 1.0,
+) -> Union[Tuple[float, Dict[str, float]], Tuple[float, Dict[str, float], List[str], List[str]]]:
+    """
+    Evaluate the model on the given data.
+    
+    Args:
+        model: Model to evaluate
+        data_loader: DataLoader for evaluation
+        forward_fn: Function to use for forward pass
+        metrics_fn: Function to compute metrics
+        model_type: Type of model
+        tokenizer: Tokenizer for preprocessing
+        beam_size: Beam size for generation
+        max_seq_len: Maximum sequence length
+        is_test: Whether this is a test evaluation
+        device: Device to use
+        length_penalty: Length penalty for generation
+        
+    Returns:
+        If is_test=False: Tuple of (loss, metrics)
+        If is_test=True: Tuple of (loss, metrics, hypotheses, references)
+    """
+    model.eval()
+    torch.set_grad_enabled(False)
+    
+    total_loss = 0
+    list_hyp = []
+    list_label = []
+    
+    logger.info("Progress bar created, starting evaluation loop...")
+    pbar = tqdm(iter(data_loader), leave=True, total=len(data_loader))
+    
+    for i, batch_data in enumerate(pbar):
+        loss, batch_hyp, batch_label = forward_fn(
+            model, batch_data, model_type=model_type, tokenizer=tokenizer,
+            is_inference=True, device=device, skip_special_tokens=True,
+            beam_size=beam_size, max_seq_len=max_seq_len, length_penalty=length_penalty
+        )
+        
+        val_loss = loss.item()
+        total_loss = total_loss + val_loss
+        
+        # Store hypotheses and references
+        list_hyp += batch_hyp
+        list_label += batch_label
+        
+        pbar.set_description("VALID LOSS:%.4f" % (total_loss/(i+1)))
+    
+    # Calculate metrics
+    metrics = metrics_fn(list_hyp, list_label)
+    
+    # Calculate average loss
+    avg_loss = total_loss / len(data_loader)
+    
+    # Return results
+    if is_test:
+        return avg_loss, metrics, list_hyp, list_label
+    else:
+        return avg_loss, metrics
+
+
 def evaluate_model(
     model: MBartForConditionalGeneration,
     test_loader: torch.utils.data.DataLoader,
@@ -280,49 +356,47 @@ def evaluate_model(
     os.makedirs(output_dir, exist_ok=True)
     
     # Evaluate the model
-    test_loss, test_metrics, test_hyp, test_label = forward_generation(
+    test_loss, test_metrics, test_hyp, test_label = evaluate(
         model=model,
-        batch_data=next(iter(test_loader)),
+        data_loader=test_loader,
+        forward_fn=forward_generation,
+        metrics_fn=generation_metrics_fn,
         model_type=model_type,
         tokenizer=tokenizer,
         beam_size=beam_size,
         max_seq_len=max_seq_len,
-        is_inference=True,
         is_test=True,
         device=device,
-        length_penalty=length_penalty
+        length_penalty=length_penalty,
     )
     
-    # Create dataframes for results
-    result_df = pd.DataFrame({
-        'hyp': test_hyp,
-        'label': test_label
-    })
+    # Print metrics
+    logger.info(f'Test loss: {test_loss:.4f}')
+    for metric_name, metric_value in test_metrics.items():
+        logger.info(f'Test {metric_name}: {metric_value:.2f}')
     
-    metrics_df = pd.DataFrame([test_metrics])
+    # Save results in CSV format
+    results = []
+    for i, (hyp, ref) in enumerate(zip(test_hyp, test_label)):
+        results.append({
+            'id': i,
+            'reference': ref,
+            'generated': hyp
+        })
     
-    # Log results
-    logger.info("== Prediction Result ==")
-    logger.info(result_df.head())
-    logger.info("")
+    df = pd.DataFrame(results)
+    df.to_csv(os.path.join(output_dir, 'test_results.csv'), index=False)
     
-    logger.info("== Model Performance ==")
-    logger.info(metrics_df.describe())
+    # Calculate metrics on saved results as a sanity check
+    verify_metrics = generation_metrics_fn(df['generated'].tolist(), df['reference'].tolist())
+    logger.info('Metrics on saved results:')
+    for metric_name, metric_value in verify_metrics.items():
+        logger.info(f'Verified {metric_name}: {metric_value:.2f}')
     
-    # Save results
-    result_path = os.path.join(output_dir, f"prediction_result_{length_penalty}.csv")
-    metrics_path = os.path.join(output_dir, f"evaluation_result_{length_penalty}.csv")
-    
-    result_df.to_csv(result_path, index=False)
-    metrics_df.describe().to_csv(metrics_path)
-    
-    logger.info(f"Results saved to {output_dir}")
-    
+    # Return evaluation results
     return {
         'loss': test_loss,
         'metrics': test_metrics,
-        'predictions': test_hyp,
-        'references': test_label,
-        'result_path': result_path,
-        'metrics_path': metrics_path
+        'hypotheses': test_hyp,
+        'references': test_label
     }
