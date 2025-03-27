@@ -273,7 +273,7 @@ def evaluate(
 ) -> Union[Tuple[float, Dict[str, float]], Tuple[float, Dict[str, float], List[str], List[str]]]:
     """
     Evaluate the model on the given data.
-    
+
     Args:
         model: Model to evaluate
         data_loader: DataLoader for evaluation
@@ -291,14 +291,18 @@ def evaluate(
         If is_test=False: Tuple of (loss, metrics)
         If is_test=True: Tuple of (loss, metrics, hypotheses, references)
     """
+    logger.info("Starting evaluation...")
     model.eval()
     torch.set_grad_enabled(False)
+    logger.info(f"Evaluation setup complete - DataLoader has {len(data_loader)} batches")
     
     total_loss = 0
     
     list_hyp, list_label = [], []
     
+    logger.info("Creating progress bar...")
     pbar = tqdm(iter(data_loader), leave=True, total=len(data_loader))
+    logger.info("Progress bar created, starting evaluation loop...")
     for i, batch_data in enumerate(pbar):
         loss, batch_hyp, batch_label = forward_fn(
             model, batch_data, model_type=model_type, tokenizer=tokenizer,
