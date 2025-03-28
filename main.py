@@ -123,6 +123,7 @@ def checkpoint_callback(
     epoch: int,
     checkpoint_path: str,
     metric_value: float,
+    tokenizer: Optional[Any] = None,
 ) -> None:
     """
     Callback for saving checkpoints.
@@ -132,11 +133,22 @@ def checkpoint_callback(
         epoch: Current epoch
         checkpoint_path: Path to save checkpoint to
         metric_value: Value of the validation metric
+        tokenizer: Tokenizer to save (optional)
     """
     try:
         logger.info(f"Saving checkpoint at epoch {epoch+1} with {metric_value:.4f}...")
-        torch.save(model.state_dict(), checkpoint_path)
-        logger.info(f"Checkpoint saved to {checkpoint_path}")
+        if tokenizer is not None:
+            from hub_utils import save_model_to_disk
+            save_model_to_disk(
+                model=model,
+                tokenizer=tokenizer,
+                output_dir=os.path.dirname(checkpoint_path),
+                save_tokenizer=True
+            )
+            logger.info(f"Saved model and tokenizer to {os.path.dirname(checkpoint_path)}")
+        else:
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info(f"Checkpoint saved to {checkpoint_path}")
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {str(e)}")
     
@@ -339,7 +351,9 @@ def main() -> None:
         exp_id=args.exp_id,
         fp16=args.fp16,
         device=device,
-        checkpoint_callback=checkpoint_callback,
+        checkpoint_callback=lambda model, epoch, path, metric: checkpoint_callback(
+            model, epoch, path, metric, tokenizer=tokenizer
+        ),
         length_penalty=args.length_penalty,
     )
     

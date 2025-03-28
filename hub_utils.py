@@ -1,9 +1,10 @@
 """
 Utilities for pushing models to the Hugging Face Hub.
 """
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 import os
 import logging
+import json
 from pathlib import Path
 
 import torch

@@ -288,7 +288,14 @@ def train(
                     checkpoint_callback(model, epoch, best_model_path, val_metric)
                 else:
                     logger.info(f"Saving checkpoint to {best_model_path}")
-                    torch.save(model.state_dict(), best_model_path)
+                    # Save both model and tokenizer together
+                    from hub_utils import save_model_to_disk
+                    save_model_to_disk(
+                        model=model,
+                        tokenizer=tokenizer,
+                        output_dir=os.path.dirname(best_model_path),
+                        save_tokenizer=True
+                    )
 
                 count_stop = 0
             else:

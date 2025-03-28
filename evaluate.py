@@ -61,6 +61,9 @@ def plot_metrics(metrics: Dict[str, float], output_dir: str) -> None:
         plt.savefig(plot_path)
         plt.close()
         logger.info(f"Saved metrics plot to {plot_path}")
+    except Exception as e:
+        logger.error(f"Failed to generate metrics plot: {str(e)}")
+        logger.exception("Plotting error details:")
 
 def plot_length_distribution(hypotheses: List[str], references: List[str], output_dir: str) -> None:
     """
@@ -99,58 +102,6 @@ def plot_length_distribution(hypotheses: List[str], references: List[str], outpu
         
         plt.tight_layout()
         plot_path = os.path.join(output_dir, 'length_distribution.png')
-        plt.savefig(plot_path)
-        plt.close()
-        logger.info(f"Saved length distribution plot to {plot_path}")
-        
-        # Add value labels
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{height:.2f}',
-                    ha='center', va='bottom')
-        
-        plt.tight_layout()
-        plot_path = os.path.join(output_dir, 'metrics_barplot.png')
-        plt.savefig(plot_path)
-        plt.close()
-        logger.info(f"Saved metrics bar plot to {plot_path}")
-        
-    except Exception as e:
-        logger.error(f"Failed to generate metrics plot: {str(e)}")
-        logger.exception("Plotting error details:")
-
-
-def plot_length_distribution(hypotheses: List[str], references: List[str], output_dir: str) -> None:
-    """
-    Generate and save plots of length distributions.
-    
-    Args:
-        hypotheses: List of generated texts
-        references: List of reference texts
-        output_dir: Directory to save plots to
-    """
-    try:
-        # Calculate lengths
-        hyp_lens = [len(h.split()) for h in hypotheses]
-        ref_lens = [len(r.split()) for r in references]
-        
-        # Create figure
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-        
-        # Generated lengths
-        ax1.hist(hyp_lens, bins=30, alpha=0.7, color='blue')
-        ax1.set_title('Generated Text Lengths')
-        ax1.set_xlabel('Word Count')
-        ax1.set_ylabel('Frequency')
-        
-        # Reference lengths
-        ax2.hist(ref_lens, bins=30, alpha=0.7, color='green')
-        ax2.set_title('Reference Text Lengths')
-        ax2.set_xlabel('Word Count')
-        
-        plt.tight_layout()
-        plot_path = os.path.join(output_dir, 'length_distributions.png')
         plt.savefig(plot_path)
         plt.close()
         logger.info(f"Saved length distribution plot to {plot_path}")
@@ -267,17 +218,36 @@ def generation_metrics_fn(hypotheses: List[str], references: List[str]) -> Dict[
     Returns:
         Dictionary of all metrics
     """
-    # Compute BLEU score
-    bleu = compute_bleu_score(hypotheses, references)
+    # Filter out empty outputs
+    valid_pairs = [(h, r) for h, r in zip(hypotheses, references) if h != "[EMPTY_OUTPUT]"]
+    filtered_count = len(hypotheses) - len(valid_pairs)
     
-    # Compute SacreBLEU score
-    sacrebleu_score = compute_sacrebleu_score(hypotheses, references)
+    if filtered_count > 0:
+        logger.warning(f"Filtered out {filtered_count} empty outputs from metrics calculation")
+        
+    # Extract filtered lists
+    filtered_hyp = [h for h, _ in valid_pairs]
+    filtered_ref = [r for _, r in valid_pairs]
     
-    # Compute ROUGE scores
-    rouge_scores = compute_rouge_scores(hypotheses, references)
+    # Compute BLEU score on filtered outputs
+    bleu = compute_bleu_score(filtered_hyp, filtered_ref) if valid_pairs else 0.0
+    
+    # Compute SacreBLEU score on filtered outputs
+    sacrebleu_score = compute_sacrebleu_score(filtered_hyp, filtered_ref) if valid_pairs else 0.0
+    
+    # Compute ROUGE scores on filtered outputs
+    rouge_scores = compute_rouge_scores(filtered_hyp, filtered_ref) if valid_pairs else {
+        'ROUGE1': 0.0,
+        'ROUGE2': 0.0,
+        'ROUGEL': 0.0,
+        'ROUGELsum': 0.0
+    }
 
-    # Compute BERTScore
-    P, R, F1 = score(hypotheses, references, lang="id", verbose=True)
+    # Compute BERTScore on filtered outputs
+    if valid_pairs:
+        P, R, F1 = score(filtered_hyp, filtered_ref, lang="id", verbose=True)
+    else:
+        P = R = F1 = torch.zeros(1)
     bertscore_f1 = F1.mean().item()
     bertscore_precision = P.mean().item()
     bertscore_recall = R.mean().item()
@@ -375,10 +345,22 @@ def forward_generation(
         # Convert generated tokens to text
         decode_start = time.time()
         generated_texts = []
+        empty_count = 0
+        
         for gen_ids in generated_ids:
             gen_text = tokenizer.decode(gen_ids, skip_special_tokens=skip_special_tokens)
+            
+            # Handle empty outputs
+            if not gen_text.strip():
+                gen_text = "[EMPTY_OUTPUT]"
+                empty_count += 1
+                logger.warning("Empty generation detected")
+                
             generated_texts.append(gen_text)
+            
         logger.info(f"Decoding took {time.time() - decode_start:.2f}s")
+        if empty_count > 0:
+            logger.warning(f"Found {empty_count} empty generations in this batch")
         
         # Compute loss (even for inference to track progress)
         loss_start = time.time()
