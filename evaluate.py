@@ -1,13 +1,15 @@
 """
-Evaluation functionality for IndoBART fine-tuned on the IndoSUM dataset.
+Enhanced evaluation functionality for IndoBART fine-tuned on the IndoSUM dataset.
+Includes metrics calculation, visualization, and structured output.
 """
 from typing import Dict, List, Optional, Tuple, Union, Any, Callable
 import time
-
+import json
 import os
 import torch
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 import logging
 from transformers import MBartForConditionalGeneration
@@ -21,7 +23,141 @@ import sacrebleu
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from bert_score import score
 
+# Configure matplotlib
+plt.style.use('seaborn')
+plt.rcParams['figure.figsize'] = (12, 6)
+
 logger = logging.getLogger(__name__)
+
+
+def plot_metrics(metrics: Dict[str, float], output_dir: str) -> None:
+    """
+    Generate and save plots of evaluation metrics.
+    
+    Args:
+        metrics: Dictionary of metric names to values
+        output_dir: Directory to save plots to
+    """
+    try:
+        # Bar plot of all metrics
+        fig, ax = plt.subplots()
+        names = list(metrics.keys())
+        values = list(metrics.values())
+        
+        bars = ax.bar(names, values)
+        ax.set_title('Evaluation Metrics')
+        ax.set_ylabel('Score')
+        ax.set_xticklabels(names, rotation=45, ha='right')
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{height:.3f}',
+                    ha='center', va='bottom')
+        
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, 'metrics.png')
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info(f"Saved metrics plot to {plot_path}")
+
+def plot_length_distribution(hypotheses: List[str], references: List[str], output_dir: str) -> None:
+    """
+    Generate and save plots of length distributions.
+    
+    Args:
+        hypotheses: List of generated texts
+        references: List of reference texts
+        output_dir: Directory to save plots to
+    """
+    try:
+        # Calculate lengths
+        hyp_lens = [len(h.split()) for h in hypotheses]
+        ref_lens = [len(r.split()) for r in references]
+        
+        # Create figure with subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Plot histogram of lengths
+        ax1.hist(hyp_lens, bins=20, alpha=0.5, label='Generated')
+        ax1.hist(ref_lens, bins=20, alpha=0.5, label='Reference')
+        ax1.set_title('Length Distribution')
+        ax1.set_xlabel('Word Count')
+        ax1.set_ylabel('Frequency')
+        ax1.legend()
+        
+        # Plot scatter of lengths
+        ax2.scatter(ref_lens, hyp_lens, alpha=0.5)
+        ax2.set_title('Generated vs Reference Lengths')
+        ax2.set_xlabel('Reference Length')
+        ax2.set_ylabel('Generated Length')
+        
+        # Add line of perfect prediction
+        max_len = max(max(ref_lens), max(hyp_lens))
+        ax2.plot([0, max_len], [0, max_len], 'r--')
+        
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, 'length_distribution.png')
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info(f"Saved length distribution plot to {plot_path}")
+        
+        # Add value labels
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{height:.2f}',
+                    ha='center', va='bottom')
+        
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, 'metrics_barplot.png')
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info(f"Saved metrics bar plot to {plot_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to generate metrics plot: {str(e)}")
+        logger.exception("Plotting error details:")
+
+
+def plot_length_distribution(hypotheses: List[str], references: List[str], output_dir: str) -> None:
+    """
+    Generate and save plots of length distributions.
+    
+    Args:
+        hypotheses: List of generated texts
+        references: List of reference texts
+        output_dir: Directory to save plots to
+    """
+    try:
+        # Calculate lengths
+        hyp_lens = [len(h.split()) for h in hypotheses]
+        ref_lens = [len(r.split()) for r in references]
+        
+        # Create figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        
+        # Generated lengths
+        ax1.hist(hyp_lens, bins=30, alpha=0.7, color='blue')
+        ax1.set_title('Generated Text Lengths')
+        ax1.set_xlabel('Word Count')
+        ax1.set_ylabel('Frequency')
+        
+        # Reference lengths
+        ax2.hist(ref_lens, bins=30, alpha=0.7, color='green')
+        ax2.set_title('Reference Text Lengths')
+        ax2.set_xlabel('Word Count')
+        
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, 'length_distributions.png')
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info(f"Saved length distribution plot to {plot_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to generate length distribution plot: {str(e)}")
+        logger.exception("Plotting error details:")
 
 
 def compute_bleu_score(hypotheses: List[str], references: List[str]) -> float:
@@ -458,7 +594,7 @@ def evaluate_model(
     length_penalty: float = 1.0,
 ) -> Dict[str, Any]:
     """
-    Evaluate the model on the test set and save results.
+    Evaluate the model on the test set and save results with enhanced structure.
     
     Args:
         model: Model to evaluate
@@ -472,55 +608,114 @@ def evaluate_model(
         length_penalty: Length penalty for generation
         
     Returns:
-        Dictionary of evaluation results
+        Dictionary of evaluation results with keys:
+        - loss: Test loss
+        - metrics: Dictionary of test metrics
+        - hypotheses: List of generated texts
+        - references: List of reference texts
+        - output_dir: Path to saved results
     """
-    logger.info("Starting evaluation...")
-    
-    # Make sure the output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Evaluate the model
-    test_loss, test_metrics, test_hyp, test_label = evaluate(
-        model=model,
-        data_loader=test_loader,
-        forward_fn=forward_generation,
-        metrics_fn=generation_metrics_fn,
-        model_type=model_type,
-        tokenizer=tokenizer,
-        beam_size=beam_size,
-        max_seq_len=max_seq_len,
-        is_test=True,
-        device=device,
-        length_penalty=length_penalty,
-    )
-    
-    # Print metrics
-    logger.info(f'Test loss: {test_loss:.4f}')
-    for metric_name, metric_value in test_metrics.items():
-        logger.info(f'Test {metric_name}: {metric_value:.2f}')
-    
-    # Save results in CSV format
-    results = []
-    for i, (hyp, ref) in enumerate(zip(test_hyp, test_label)):
-        results.append({
-            'id': i,
-            'reference': ref,
-            'generated': hyp
-        })
-    
-    df = pd.DataFrame(results)
-    df.to_csv(os.path.join(output_dir, 'test_results.csv'), index=False)
-    
-    # Calculate metrics on saved results as a sanity check
-    verify_metrics = generation_metrics_fn(df['generated'].tolist(), df['reference'].tolist())
-    logger.info('Metrics on saved results:')
-    for metric_name, metric_value in verify_metrics.items():
-        logger.info(f'Verified {metric_name}: {metric_value:.2f}')
-    
-    # Return evaluation results
-    return {
-        'loss': test_loss,
-        'metrics': test_metrics,
-        'hypotheses': test_hyp,
-        'references': test_label
-    }
+    try:
+        logger.info("Starting enhanced evaluation...")
+        
+        # Create structured output directories
+        results_dir = os.path.join(output_dir, "evaluation")
+        samples_dir = os.path.join(results_dir, "samples")
+        metrics_dir = os.path.join(results_dir, "metrics")
+        plots_dir = os.path.join(results_dir, "plots")
+        
+        os.makedirs(results_dir, exist_ok=True)
+        os.makedirs(samples_dir, exist_ok=True)
+        os.makedirs(metrics_dir, exist_ok=True)
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        logger.info(f"Created structured output directories in {results_dir}")
+        
+        # Evaluate the model
+        test_loss, test_metrics, test_hyp, test_label = evaluate(
+            model=model,
+            data_loader=test_loader,
+            forward_fn=forward_generation,
+            metrics_fn=generation_metrics_fn,
+            model_type=model_type,
+            tokenizer=tokenizer,
+            beam_size=beam_size,
+            max_seq_len=max_seq_len,
+            is_test=True,
+            device=device,
+            length_penalty=length_penalty,
+        )
+        
+        # Log metrics in detail
+        logger.info("=== Evaluation Metrics ===")
+        logger.info(f"Test loss: {test_loss:.4f}")
+        for metric_name, metric_value in test_metrics.items():
+            logger.info(f"{metric_name}: {metric_value:.4f}")
+        
+        # Save metrics to JSON
+        metrics_path = os.path.join(metrics_dir, "metrics.json")
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(test_metrics, f, indent=2)
+        logger.info(f"Saved metrics to {metrics_path}")
+
+        # Generate and save visualizations
+        plot_metrics(test_metrics, plots_dir)
+        plot_length_distribution(test_hyp, test_label, plots_dir)
+        
+        # Save detailed results
+        results = []
+        for i, (hyp, ref) in enumerate(zip(test_hyp, test_label)):
+            results.append({
+                'id': i,
+                'reference': ref,
+                'generated': hyp,
+                'reference_length': len(ref.split()),
+                'generated_length': len(hyp.split()),
+                'length_diff': len(hyp.split()) - len(ref.split())
+            })
+            
+            # Save first 100 samples for analysis
+            if i < 100:
+                sample_path = os.path.join(samples_dir, f"sample_{i}.txt")
+                with open(sample_path, "w", encoding="utf-8") as f:
+                    f.write(f"=== Reference ===\n{ref}\n\n")
+                    f.write(f"=== Generated ===\n{hyp}\n\n")
+                    f.write(f"=== Lengths ===\nReference: {len(ref.split())} words\nGenerated: {len(hyp.split())} words\n")
+        
+        # Save full results to CSV
+        df = pd.DataFrame(results)
+        results_path = os.path.join(results_dir, "test_results.csv")
+        df.to_csv(results_path, index=False)
+        logger.info(f"Saved full results to {results_path}")
+        
+        # Save top/bottom samples based on length difference
+        df_sorted = df.sort_values("length_diff", ascending=False)
+        extremes_path = os.path.join(samples_dir, "length_extremes.csv")
+        df_sorted.head(20).to_csv(extremes_path, index=False)
+        logger.info(f"Saved length extremes to {extremes_path}")
+        
+        # Verify metrics on saved results
+        verify_metrics = generation_metrics_fn(df['generated'].tolist(), df['reference'].tolist())
+        logger.info("=== Verified Metrics ===")
+        for metric_name, metric_value in verify_metrics.items():
+            logger.info(f"Verified {metric_name}: {metric_value:.4f}")
+        
+        # Save verification metrics
+        verify_path = os.path.join(metrics_dir, "verified_metrics.json")
+        with open(verify_path, "w", encoding="utf-8") as f:
+            json.dump(verify_metrics, f, indent=2)
+        logger.info(f"Saved verified metrics to {verify_path}")
+        
+        # Return comprehensive results
+        return {
+            'loss': test_loss,
+            'metrics': test_metrics,
+            'hypotheses': test_hyp,
+            'references': test_label,
+            'output_dir': results_dir
+        }
+        
+    except Exception as e:
+        logger.error(f"Evaluation failed: {str(e)}")
+        logger.exception("Error details:")
+        raise RuntimeError(f"Evaluation failed: {str(e)}") from e

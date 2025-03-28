@@ -14,38 +14,89 @@ logger = logging.getLogger(__name__)
 
 
 def save_model_to_disk(
-    model: MBartForConditionalGeneration, 
+    model: MBartForConditionalGeneration,
     tokenizer: PreTrainedTokenizer,
     output_dir: str,
-    save_tokenizer: bool = True
+    save_tokenizer: bool = True,
+    training_args: Optional[Dict[str, Any]] = None,
+    eval_results: Optional[Dict[str, Any]] = None
 ) -> str:
     """
-    Save model and tokenizer to disk.
+    Save model and tokenizer to disk with enhanced structure and metadata.
     
     Args:
         model: Model to save
         tokenizer: Tokenizer to save
         output_dir: Directory to save to
         save_tokenizer: Whether to save tokenizer
+        training_args: Dictionary of training arguments to save as metadata
+        eval_results: Dictionary of evaluation results to save as metadata
         
     Returns:
         Path to saved model
     """
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    logger.info(f"Saving model and tokenizer to {output_dir}")
-    
-    # Save model
-    model.save_pretrained(output_dir)
-    
-    # Save tokenizer
-    if save_tokenizer:
-        tokenizer.save_pretrained(output_dir)
-    
-    logger.info(f"Model and tokenizer saved to {output_dir}")
-    
-    return output_dir
+    try:
+        # Create structured output directories
+        model_dir = os.path.join(output_dir, "model")
+        tokenizer_dir = os.path.join(output_dir, "tokenizer")
+        metadata_dir = os.path.join(output_dir, "metadata")
+        
+        os.makedirs(model_dir, exist_ok=True)
+        if save_tokenizer:
+            os.makedirs(tokenizer_dir, exist_ok=True)
+        os.makedirs(metadata_dir, exist_ok=True)
+        
+        logger.info(f"Saving model and tokenizer to structured directory: {output_dir}")
+        
+        # Save model with additional configuration
+        model.save_pretrained(
+            model_dir,
+            safe_serialization=True
+        )
+        logger.info(f"Model saved to {model_dir}")
+        
+        # Save tokenizer with additional configuration
+        if save_tokenizer:
+            tokenizer.save_pretrained(tokenizer_dir)
+            logger.info(f"Tokenizer saved to {tokenizer_dir}")
+        
+        # Save metadata
+        metadata = {
+            "model_type": model.config.model_type,
+            "model_config": model.config.to_dict(),
+            "training_args": training_args or {},
+            "eval_results": eval_results or {}
+        }
+        
+        metadata_path = os.path.join(metadata_dir, "metadata.json")
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Metadata saved to {metadata_path}")
+        
+        # Verify saved files
+        required_files = [
+            os.path.join(model_dir, "config.json"),
+            os.path.join(model_dir, "pytorch_model.bin")
+        ]
+        
+        if save_tokenizer:
+            required_files.extend([
+                os.path.join(tokenizer_dir, "tokenizer_config.json"),
+                os.path.join(tokenizer_dir, "special_tokens_map.json")
+            ])
+            
+        missing_files = [f for f in required_files if not os.path.exists(f)]
+        if missing_files:
+            raise FileNotFoundError(f"Missing required files after saving: {missing_files}")
+        
+        logger.info(f"Successfully saved model and tokenizer to {output_dir}")
+        logger.info(f"Directory structure:\n{os.listdir(output_dir)}")
+        
+        return output_dir
+    except Exception as e:
+        logger.error(f"Failed to save model and tokenizer: {str(e)}")
+        logger.exception("Error details:")
+        raise RuntimeError(f"Failed to save model: {str(e)}") from e
 
 
 def push_to_hub(
