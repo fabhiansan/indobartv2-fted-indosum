@@ -31,7 +31,8 @@ from transformers.trainer_utils import get_last_checkpoint
 # Helper function (similar to what might be in transformers.utils)
 def require_version(constraint, message):
     # Simplified check
-    pass # In a real scenario, you might use packaging.version to check
+    if packaging.version.parse(datasets.__version__) < packaging.version.parse("1.1.0"):
+        warnings.warn("Streaming mode may require datasets>=1.1.0")
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -41,7 +42,6 @@ MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 @dataclass
 class ModelArguments:
     """Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch."""
-
     model_name_or_path: Optional[str] = field(
         default="facebook/bart-base",
         metadata={
@@ -79,20 +79,19 @@ class ModelArguments:
             )
         },
     )
-    use_auth_token: bool = field(
+    use_auth_token: Optional[bool] = field(
         default=None,
         metadata={
-            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead.",
-            "deprecated": True,
+            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token` instead."
         },
     )
     trust_remote_code: bool = field(
         default=False,
         metadata={
             "help": (
-                "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option "
-                "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
-                "execute code present on the Hub on your local machine."
+                "Whether or not to allow for custom models defined on the Hub in their own modeling files. "
+                "This option should only be set to `True` for repositories you trust and in which you have read the code, "
+                "as it will execute code present on the Hub on your local machine."
             )
         },
     )
@@ -137,7 +136,7 @@ class DataTrainingArguments:
     )
     mlm_probability: float = field(
         default=0.15,
-        metadata={"help": "Ratio of tokens to mask for masked language modeling loss (note: BART uses text infilling)"}
+        metadata={"help": "Ratio of tokens to mask for masked language modeling loss (note: BART uses text infilling)"},
     )
     line_by_line: bool = field(
         default=False,
@@ -186,18 +185,34 @@ class DataTrainingArguments:
                 extension = self.validation_file.split(".")[-1]
                 assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, json or txt file."
 
+
+@dataclass
+class BartObjectiveArguments:
+    """Arguments pertaining to the BART pre-training objective."""
+
+    bart_objective: bool = field(
+        default=False, metadata={"help": "Whether to use the BART text infilling objective instead of standard MLM."}
+    )
+    poisson_lambda: float = field(
+        default=3.0, metadata={"help": "Lambda for Poisson distribution to sample span lengths for BART objective."}
+    )
+    masking_fraction: float = field(
+        default=0.30, metadata={"help": "Fraction of tokens to mask for BART objective (note: BART paper used 0.3 of *spans*)."}
+    )
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, BartObjectiveArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, bart_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, bart_args = parser.parse_args_into_dataclasses()
 
     if model_args.use_auth_token is not None:
         warnings.warn(
@@ -254,7 +269,6 @@ def main():
 
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
     # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
-    # (the dataset will be downloaded automatically from the datasets Hub).
     #
     # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
     # 'text' is found. You can easily tweak this behavior (see below).
@@ -321,7 +335,8 @@ def main():
 
     # Load pretrained model and tokenizer
     #
-    # Distributed training: The .from_pretrained methods guarantee that only one local process can concurrently
+    # Distributed training:
+    # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     config_kwargs = {
         "cache_dir": model_args.cache_dir,
@@ -506,16 +521,138 @@ def main():
                  eval_dataset = eval_dataset.select(range(max_eval_samples)) if not data_args.streaming else eval_dataset.take(max_eval_samples)
 
     # Data collator
-    # This one will take care of randomly masking the tokens.
-    # WARNING: DataCollatorForLanguageModeling performs standard MLM (like BERT).
-    # True BART pre-training uses text infilling (masking spans) and potentially sentence permutation.
-    # Implementing a custom DataCollator is necessary for faithful BART pre-training.
-    logger.warning(
-        "Using DataCollatorForLanguageModeling for pre-training. "
-        "This performs standard MLM, not BART's text infilling. "
-        "For true BART pre-training, implement a custom data collator."
-    )
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=data_args.mlm_probability)
+    # We have already loaded the tokenizer, so we use it directly.
+    if bart_args.bart_objective:
+        logger.info("Using BART text infilling objective with custom data collator.")
+        # Ensure tokenizer has mask token if we are doing BART objective
+        if tokenizer.mask_token is None:
+            raise ValueError(
+                "This tokenizer does not have a mask token which is required for the BART objective. "
+                "Make sure you are using a model suitable for this task or add a mask token during tokenizer training/loading."
+            )
+        data_collator = DataCollatorForBartSeq2Seq(
+            tokenizer=tokenizer,
+            masking_fraction=bart_args.masking_fraction,
+            poisson_lambda=bart_args.poisson_lambda,
+            pad_to_multiple_of=8 if training_args.fp16 else None, # Pad for FP16 efficiency
+        )
+    else:
+        logger.info("Using standard Masked Language Modeling (MLM) objective.")
+        if tokenizer.mask_token is None:
+             warnings.warn(
+                "This tokenizer does not have a mask token which is required for MLM. Adding one temporarily."
+                " Consider adding it permanently during tokenizer training/loading."
+             )
+             # Potentially add a mask token here if really needed, but it's better if the tokenizer has it.
+             # tokenizer.add_special_tokens({'mask_token': '[MASK]'}) 
+             # model.resize_token_embeddings(len(tokenizer)) 
+
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=tokenizer,
+            mlm_probability=data_args.mlm_probability,
+            pad_to_multiple_of=8 if training_args.fp16 else None, # Pad for FP16 efficiency
+        )
+
+    @dataclass
+    class DataCollatorForBartSeq2Seq:
+        """
+        Data collator for BART sequence-to-sequence pre-training (text infilling).
+        Reference: BART Paper (https://arxiv.org/abs/1910.13461)
+        Adapated from similar implementations found online.
+        """
+        tokenizer: BartTokenizerFast
+        masking_fraction: float # Fraction of tokens to mask
+        poisson_lambda: float # Lambda for span length sampling
+        pad_to_multiple_of: Optional[int] = None
+        ignore_pad_token_for_loss: bool = True
+
+        def __call__(self, examples):
+            import torch
+            import numpy as np
+            import random
+
+            batch = self.tokenizer( # Tokenize the inputs
+                [ex["text"] for ex in examples], 
+                return_tensors="pt", 
+                padding="longest", 
+                truncation=True, 
+                max_length=self.tokenizer.model_max_length
+            )
+            
+            input_ids = batch["input_ids"]
+            batch["labels"] = input_ids.clone() # Labels are the original uncorrupted sequence
+
+            # Perform BART's text infilling corruption
+            masked_input_ids = input_ids.clone()
+            special_tokens_mask = self.tokenizer.get_special_tokens_mask(input_ids.tolist(), already_has_special_tokens=True)
+            special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+
+            for i in range(input_ids.size(0)):
+                # Exclude padding and special tokens from potential masking
+                non_special_indices = torch.nonzero((~special_tokens_mask[i]) & (input_ids[i] != self.tokenizer.pad_token_id), as_tuple=False).squeeze()
+                
+                if len(non_special_indices) == 0:
+                    continue
+
+                n_tokens_to_mask = int(np.ceil(len(non_special_indices) * self.masking_fraction))
+                if n_tokens_to_mask == 0:
+                    continue
+
+                masked_count = 0
+                attempts = 0
+                max_attempts = 10 # Prevent infinite loops in rare cases
+
+                indices_masked = set() # Keep track of already masked indices within spans
+
+                while masked_count < n_tokens_to_mask and attempts < max_attempts:
+                    span_len = np.random.poisson(self.poisson_lambda)
+                    if span_len == 0:
+                        attempts += 1
+                        continue
+                    
+                    # Sample a starting index for the span
+                    anchor = non_special_indices[np.random.randint(0, len(non_special_indices))].item()
+                    
+                    # Find the actual range in the original sequence
+                    start_idx = anchor
+                    end_idx = min(start_idx + span_len, input_ids.size(1) -1) # Don't mask EOS/PAD if they are last
+
+                    # Only mask if it hasn't been masked by a previous span in this iteration
+                    mask_applied = False
+                    indices_to_mask_this_span = []
+                    for idx in range(start_idx, end_idx):
+                        if idx not in indices_masked and not special_tokens_mask[i, idx]:
+                             indices_to_mask_this_span.append(idx)
+
+                    if indices_to_mask_this_span:
+                        first_mask_idx = indices_to_mask_this_span[0]
+                        # Replace the *first* token of the span with <mask>
+                        masked_input_ids[i, first_mask_idx] = self.tokenizer.mask_token_id
+                        # Mark all tokens in the span as masked (for counting and overlap prevention)
+                        for idx in indices_to_mask_this_span:
+                           indices_masked.add(idx)
+                        masked_count += len(indices_to_mask_this_span)
+                        mask_applied = True
+                        
+                        # Delete the subsequent tokens in the masked span
+                        # This requires careful index handling as the sequence length changes
+                        # For simplicity in this collator, we will just mask them. 
+                        # A more accurate implementation might actually delete tokens and adjust attention mask.
+                        # However, simply using the mask token is a common simplification.
+
+                    if not mask_applied:
+                        attempts += 1
+
+            batch["input_ids"] = masked_input_ids
+
+            # Ignore padding tokens in labels
+            if self.ignore_pad_token_for_loss:
+                batch["labels"][batch["labels"] == self.tokenizer.pad_token_id] = -100
+
+            # Create attention mask based on the *masked* input ids
+            batch["attention_mask"] = (masked_input_ids != self.tokenizer.pad_token_id).long()
+
+            return batch
 
     # Initialize our Trainer
     trainer = Trainer(

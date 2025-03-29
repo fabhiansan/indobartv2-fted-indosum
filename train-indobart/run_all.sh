@@ -90,6 +90,7 @@ $ACCELERATE_CMD run_pretraining.py \
     --save_total_limit 5 \
     --max_seq_length $MAX_SEQ_LENGTH \
     --overwrite_output_dir \
+    --bart_objective true \
     --preprocessing_num_workers $(nproc) \
     --seed 42 \
     $(if [ "$FP16" = true ]; then echo "--fp16"; fi) # Add --fp16 only if FP16 is true

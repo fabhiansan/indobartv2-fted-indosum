@@ -64,9 +64,11 @@ def main():
         # Save files to disk
         tokenizer_save_path = os.path.join(args.output_dir)
         tokenizer.save_model(tokenizer_save_path)
-        # Note: save_model creates vocab.json and merges.txt
+        logger.info("Tokenizer files saved to %s", tokenizer_save_path)
 
-    except (IOError, OSError, Exception) as e: 
+    except (IOError, OSError) as e:
+        logger.error("An I/O error occurred during tokenizer training or saving: %s", e, exc_info=True)
+    except Exception as e: # Catch any other unexpected exception
         logger.error("An error occurred during tokenizer training or saving: %s", e, exc_info=True)
 
 if __name__ == "__main__":
