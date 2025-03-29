@@ -18,8 +18,7 @@ from evaluate import forward_generation, generation_metrics_fn, evaluate_model
 from hub_utils import save_model_to_disk, push_to_hub, create_model_card
 
 # Import transformers
-from transformers import MBartForConditionalGeneration
-from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import transformers
 
 # Configure logging
@@ -58,10 +57,10 @@ def parse_args() -> argparse.Namespace:
                         help="Directory to cache models and tokenizers")
     
     # Model arguments
-    parser.add_argument("--model_name", type=str, default="indobenchmark/indobart",
+    parser.add_argument("--model_name", type=str, default="cahya/bart-base-indonesian",
                         help="Pretrained model name or path")
-    parser.add_argument("--model_type", type=str, default="indo-bart",
-                        help="Model type (indo-bart)")
+    parser.add_argument("--model_type", type=str, default="bart",
+                        help="Model type (e.g., bart)")
     parser.add_argument("--max_seq_len", type=int, default=512,
                         help="Maximum sequence length")
     parser.add_argument("--max_source_length", type=int, default=1024,
@@ -123,7 +122,7 @@ def checkpoint_callback(
     epoch: int,
     checkpoint_path: str,
     metric_value: float,
-    tokenizer: Optional[Any] = None,
+    tokenizer: Optional[transformers.PreTrainedTokenizerBase] = None,
 ) -> None:
     """
     Callback for saving checkpoints.
@@ -151,7 +150,7 @@ def checkpoint_callback(
             logger.info(f"Checkpoint saved to {checkpoint_path}")
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {str(e)}")
-    
+
 
 def main() -> None:
     """
@@ -167,6 +166,7 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.model_dir, exist_ok=True)
     os.makedirs(args.cache_dir, exist_ok=True)
+    
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -177,69 +177,51 @@ def main() -> None:
 
     # Set experiment ID
     if args.exp_id is None:
-        args.exp_id = f"indosum_{args.model_type}_bs{args.batch_size}_lr{args.lr}_seed{args.seed}"
+        model_name_slug = Path(args.model_name).name
+        args.exp_id = f"indosum_{model_name_slug}_bs{args.batch_size}_lr{args.lr}_seed{args.seed}"
         logger.info(f"Experiment ID: {args.exp_id}")
     
     # Load tokenizer
     logger.info(f"Loading tokenizer from {args.model_name}")
     try:
-        # Add more detailed logging for tokenizer initialization
         logger.info("Tokenizer initialization details:")
         logger.info(f"  - Model name: {args.model_name}")
         logger.info(f"  - Cache directory: {args.cache_dir}")
         
-        tokenizer = IndoNLGTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir)
         logger.info(f"Tokenizer loaded: {tokenizer.__class__.__name__}")
         logger.info(f"Tokenizer vocabulary size: {tokenizer.vocab_size if hasattr(tokenizer, 'vocab_size') else 'N/A'}")
         logger.info(f"Tokenizer special tokens: {tokenizer.all_special_tokens}")
-        logger.info(f"Tokenizer special token ids: {[tokenizer.convert_tokens_to_ids(t) for t in tokenizer.all_special_tokens]}")
-        
-        # Log tokenizer attributes to help debug the 'default tokenizer' message
+        special_token_ids = []
+        for t in tokenizer.all_special_tokens:
+            try:
+                special_token_ids.append(tokenizer.convert_tokens_to_ids(t))
+            except KeyError:
+                logger.warning(f"Special token '{t}' not found in tokenizer vocabulary.")
+        logger.info(f"Tokenizer special token ids: {special_token_ids}")
+
         logger.info("Tokenizer Configuration Details:")
-        for attr_name in dir(tokenizer):
-            if not attr_name.startswith('_') and not callable(getattr(tokenizer, attr_name)):
-                try:
-                    attr_value = getattr(tokenizer, attr_name)
-                    if not isinstance(attr_value, (dict, list)) or len(str(attr_value)) < 100:
-                        logger.info(f"  - {attr_name}: {attr_value}")
-                except Exception:
-                    pass
-        
-        logger.info(f"Tokenizer successfully loaded")
-        logger.info(f"Vocabulary size: {len(tokenizer)}")
-        logger.info(f"Tokenizer type: {type(tokenizer).__name__}")
-
-        # Check tokenizer compatibility
-        if not hasattr(tokenizer, 'prepare_input_for_generation'):
-            logger.error("Tokenizer does not have 'prepare_input_for_generation' method. Incompatible tokenizer.")
-            raise ValueError("Incompatible tokenizer: Tokenizer must have 'prepare_input_for_generation' method.")
-
-        # Log special tokens
-        special_tokens = {
-            "Padding token": tokenizer.pad_token,
-            "Unknown token": tokenizer.unk_token,
-            "SOS/BOS token": tokenizer.bos_token,
-            "EOS token": tokenizer.eos_token
-        }
-        logger.info("Special tokens:")
-        for name, token in special_tokens.items():
-            if token:
-                logger.info(f"  - {name}: '{token}' (id: {tokenizer.convert_tokens_to_ids(token)})")
+        attrs_to_log = ['model_max_length', 'padding_side', 'truncation_side', 'name_or_path']
+        for attr_name in attrs_to_log:
+            if hasattr(tokenizer, attr_name):
+                attr_value = getattr(tokenizer, attr_name)
+                logger.info(f"  - {attr_name}: {attr_value}")
 
     except Exception as e:
-        logger.error(f"Failed to load tokenizer: {str(e)}")
-        raise RuntimeError(f"Tokenizer loading failed: {str(e)}")
+        logger.error(f"Failed to load tokenizer: {str(e)}", exc_info=True)
+        raise
 
     # Load model
     logger.info(f"Loading model from {args.model_name}")
     try:
-        model = MBartForConditionalGeneration.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name, cache_dir=args.cache_dir)
         model = model.to(device)
-        logger.info(f"Model loaded with {sum(p.numel() for p in model.parameters())} parameters")
+        logger.info(f"Model loaded: {model.__class__.__name__}")
+        logger.info(f"Model configuration: {model.config.to_dict()}")
     except Exception as e:
-        logger.error(f"Failed to load model: {str(e)}")
-        raise RuntimeError(f"Model loading failed: {str(e)}")
-    
+        logger.error(f"Failed to load model: {str(e)}", exc_info=True)
+        raise
+
     # Validate data directory exists
     if not os.path.exists(args.data_dir):
         logger.error(f"Data directory does not exist: {args.data_dir}")
@@ -254,8 +236,6 @@ def main() -> None:
             tokenizer=tokenizer,
             max_source_length=args.max_source_length,
             max_target_length=args.max_target_length,
-            source_lang="[indonesian]",
-            target_lang="[indonesian]"
         )
     
         valid_dataset = IndoSUMDataset(
@@ -264,8 +244,6 @@ def main() -> None:
             tokenizer=tokenizer,
             max_source_length=args.max_source_length,
             max_target_length=args.max_target_length,
-            source_lang="[indonesian]",
-            target_lang="[indonesian]"
         )
     
         test_dataset = IndoSUMDataset(
@@ -274,8 +252,6 @@ def main() -> None:
             tokenizer=tokenizer,
             max_source_length=args.max_source_length,
             max_target_length=args.max_target_length,
-            source_lang="[indonesian]",
-            target_lang="[indonesian]"
         )
         
         logger.info(f"Loaded {len(train_dataset)} training examples")
@@ -288,12 +264,9 @@ def main() -> None:
     # Create data loaders
     logger.info("Creating data loaders")
     
-    # Use the num_workers from args
     train_loader = SummarizationDataLoader(
         dataset=train_dataset,
-        model_type=args.model_type,
         tokenizer=tokenizer,
-        max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers
@@ -301,9 +274,7 @@ def main() -> None:
     
     valid_loader = SummarizationDataLoader(
         dataset=valid_dataset,
-        model_type=args.model_type,
         tokenizer=tokenizer,
-        max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers
@@ -311,9 +282,7 @@ def main() -> None:
     
     test_loader = SummarizationDataLoader(
         dataset=test_dataset,
-        model_type=args.model_type,
         tokenizer=tokenizer,
-        max_seq_len=args.max_seq_len,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers
@@ -340,13 +309,10 @@ def main() -> None:
         n_epochs=args.n_epochs,
         evaluate_every=args.evaluate_every,
         early_stop=args.early_stop,
-        step_size=1,
-        gamma=0.5,
         max_norm=args.max_norm,
         grad_accum=args.grad_accum,
         beam_size=args.beam_size,
-        max_seq_len=args.max_seq_len,
-        model_type=args.model_type,
+        max_seq_len=args.max_target_length,
         model_dir=args.model_dir,
         exp_id=args.exp_id,
         fp16=args.fp16,
@@ -374,9 +340,8 @@ def main() -> None:
         model=model,
         test_loader=test_loader,
         tokenizer=tokenizer,
-        model_type=args.model_type,
         beam_size=args.beam_size,
-        max_seq_len=args.max_seq_len,
+        max_seq_len=args.max_target_length,
         device=device,
         output_dir=args.output_dir,
         length_penalty=args.length_penalty,

@@ -13,7 +13,7 @@ import logging
 import gc
 
 # Import custom tokenizer - using relative import since it's within the project
-from indonlg.modules.tokenization_indonlg import IndoNLGTokenizer
+from transformers import PreTrainedTokenizerBase
 from evaluate import evaluate
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ def train(
     forward_fn: Callable,
     metrics_fn: Callable,
     valid_criterion: str,
-    tokenizer: IndoNLGTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     n_epochs: int,
     evaluate_every: int = 1,
     early_stop: int = 3,

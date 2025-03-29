@@ -1,13 +1,13 @@
 """
 Data loading utilities for the IndoSUM dataset.
 """
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 import datasets
 import os
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,13 +25,10 @@ class IndoSUMDataset(Dataset):
         self,
         data_dir: str,
         split: str,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         max_source_length: int = 1024,
         max_target_length: int = 256,
         lowercase: bool = True,
-        no_special_token: bool = False,
-        source_lang: str = "[indonesian]",
-        target_lang: str = "[indonesian]",
         swap_source_target: bool = False,
         **kwargs
     ):
@@ -45,18 +42,12 @@ class IndoSUMDataset(Dataset):
             max_source_length: Maximum length of the source text
             max_target_length: Maximum length of the target text
             lowercase: Whether to lowercase the text
-            no_special_token: Whether to include special tokens
-            source_lang: Source language token
-            target_lang: Target language token
             swap_source_target: Whether to swap source and target
         """
         self.tokenizer = tokenizer
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         self.lowercase = lowercase
-        self.no_special_token = no_special_token
-        self.source_lang = source_lang
-        self.target_lang = target_lang
         self.swap_source_target = swap_source_target
         
         # Map split names to dataset directory names
@@ -117,36 +108,42 @@ class IndoSUMDataset(Dataset):
             # Swap source and target if needed
             if self.swap_source_target:
                 source_text, target_text = target_text, source_text
-            
-            # Encode the source text
-            source_encoded = self.tokenizer.prepare_input_for_generation(
-                [source_text],
-                return_tensors='pt',
-                lang_token=self.source_lang,
-                decoder_lang_token=self.target_lang,
+
+            # Encode source and target using standard tokenizer
+            # The tokenizer will handle adding special tokens based on its configuration
+            model_inputs = self.tokenizer(
+                source_text,
                 max_length=self.max_source_length,
-                truncation=True,
+                padding=False, # Don't pad source here, handle in dataloader if needed
+                truncation=True, # Truncate source if longer than max_source_length
+                return_tensors=None, # Get list of IDs first
             )
-            
-            # Encode the target text
-            target_encoding = self.tokenizer(
-                target_text,
+
+            # Encode target for labels
+            labels = self.tokenizer(
+                text_target=target_text, # Use text_target for labels
                 max_length=self.max_target_length,
-                padding="max_length",
-                truncation=True,
-                return_tensors="pt",
-            )
-            
-            # Get the encoded ids
-            input_ids = source_encoded["input_ids"].squeeze(0)
-            attention_mask = source_encoded["attention_mask"].squeeze(0)
-            labels = target_encoding["input_ids"].squeeze(0)
-            
+                padding=False, # Don't pad target here
+                truncation=True, # Truncate target if longer than max_target_length
+                return_tensors=None, # Get list of IDs first
+            ).input_ids # Get only input_ids for labels
+
+            # Convert to tensors
+            input_ids = torch.tensor(model_inputs['input_ids'])
+            attention_mask = torch.tensor(model_inputs['attention_mask'])
+            labels = torch.tensor(labels)
+
+            # Replace padding token id in labels with -100 for CrossEntropyLoss
+            # This should happen *after* batching and padding in the collate_fn usually.
+            # However, if SummarizationDataLoader doesn't handle this, we do it here assuming no padding yet.
+            # Revisit this if using padding='max_length' or a custom collate_fn.
+            # labels[labels == self.tokenizer.pad_token_id] = -100 # Move this logic to collate_fn if possible
+
             return {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
-                "labels": labels,
-                "source_text": source_text,
+                "labels": labels, # Labels are now target_ids
+                "source_text": source_text, # Keep original text if needed downstream
                 "target_text": target_text,
             }
         except Exception as e:
@@ -159,81 +156,76 @@ class SummarizationDataLoader(DataLoader):
     DataLoader for summarization datasets.
     
     This DataLoader handles collation of examples into batches for training
-    and evaluation of summarization models.
+    and evaluation of summarization models. Includes dynamic padding.
     """
     
     def __init__(
         self,
         dataset: IndoSUMDataset,
-        model_type: str,
-        tokenizer: PreTrainedTokenizer,
-        max_seq_len: int = 512,
+        tokenizer: PreTrainedTokenizerBase,
         batch_size: int = 8,
-        src_lid_token_id: int = -1,
-        tgt_lid_token_id: int = -1,
         num_workers: int = 2,  
         shuffle: bool = True,
+        **kwargs # Allow passing other DataLoader args
     ):
         """
         Initialize the DataLoader.
         
         Args:
             dataset: Dataset to load data from
-            model_type: Type of model being used
-            tokenizer: Tokenizer to use for preprocessing
-            max_seq_len: Maximum sequence length
+            tokenizer: Tokenizer used for padding (needed in collate_fn)
             batch_size: Batch size
-            src_lid_token_id: Source language ID token
-            tgt_lid_token_id: Target language ID token
             num_workers: Number of workers to use for loading data
             shuffle: Whether to shuffle the data
         """
         self.dataset = dataset
-        self.model_type = model_type
-        self.tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
-        self.src_lid_token_id = src_lid_token_id
-        self.tgt_lid_token_id = tgt_lid_token_id
+        self.tokenizer = tokenizer # Keep tokenizer for collate_fn
         
         logger.info(f"Initializing SummarizationDataLoader with {num_workers} workers")
         
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,
-            shuffle=shuffle,
             num_workers=num_workers,
-            collate_fn=self._collate_fn,
-            timeout=60,  
-            pin_memory=torch.cuda.is_available(),  
-            prefetch_factor=2 if num_workers > 0 else None,  
+            shuffle=shuffle,
+            collate_fn=self.collate_fn, # Use custom collate_fn
+            **kwargs # Pass other args like pin_memory
         )
-        
-        logger.info(f"SummarizationDataLoader initialized with {len(dataset)} examples")
-    
-    def _collate_fn(self, examples: List[Dict[str, torch.Tensor]]) -> Tuple:
+
+    def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Collate examples into a batch.
-        
-        Args:
-            examples: List of examples to collate
-            
-        Returns:
-            Tuple of tensors for input_ids, attention_mask, and labels
+        Collate function to pad sequences dynamically within a batch.
+        Replaces padding token IDs in labels with -100.
         """
-        try:
-            # Stack input_ids, attention_mask, and labels
-            input_ids = torch.stack([ex['input_ids'] for ex in examples])
-            attention_mask = torch.stack([ex['attention_mask'] for ex in examples])
-            labels = torch.stack([ex['labels'] for ex in examples])
-            
-            # Get source and target text
-            source_text = [ex['source_text'] for ex in examples]
-            target_text = [ex['target_text'] for ex in examples]
-            
-            return (input_ids, attention_mask, labels, source_text, target_text)
-        except Exception as e:
-            # Log detailed information about the exception and examples
-            logger.error(f"Error in _collate_fn: {str(e)}")
-            for i, ex in enumerate(examples):
-                logger.error(f"Example {i} keys: {ex.keys()}")
-            raise
+        # Extract components from the batch
+        input_ids = [item['input_ids'] for item in batch]
+        attention_mask = [item['attention_mask'] for item in batch]
+        labels = [item['labels'] for item in batch]
+        source_texts = [item['source_text'] for item in batch] # Keep original text
+        target_texts = [item['target_text'] for item in batch] # Keep original text
+
+        # Pad input_ids and attention_mask
+        padded_inputs = self.tokenizer.pad(
+            {'input_ids': input_ids},
+            padding='longest', # Pad to the longest sequence in the batch
+            return_tensors='pt'
+        )
+
+        # Pad labels separately
+        padded_labels = self.tokenizer.pad(
+            {'input_ids': labels}, # Treat labels like input_ids for padding
+            padding='longest',
+            return_tensors='pt'
+        ).input_ids # Get the padded IDs tensor
+
+        # Replace padding token ID in labels with -100
+        padded_labels[padded_labels == self.tokenizer.pad_token_id] = -100
+
+        # Return the collated batch
+        return {
+            'input_ids': padded_inputs['input_ids'],
+            'attention_mask': padded_inputs['attention_mask'],
+            'labels': padded_labels,
+            'source_text': source_texts, # Include original texts if needed later
+            'target_text': target_texts,
+        }
