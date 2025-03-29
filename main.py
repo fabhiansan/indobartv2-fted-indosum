@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
                         help="Directory to cache models and tokenizers")
     
     # Model arguments
-    parser.add_argument("--model_name", type=str, default="cahya/bart-base-indonesian",
+    parser.add_argument("--model_name", type=str, default="cahya/bert-base-indonesian-522M",
                         help="Pretrained model name or path")
     parser.add_argument("--model_type", type=str, default="bart",
                         help="Model type (e.g., bart)")
