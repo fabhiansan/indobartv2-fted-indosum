@@ -10,6 +10,7 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
 import logging
 from transformers import MBartForConditionalGeneration
@@ -24,7 +25,13 @@ from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from bert_score import score
 
 # Configure matplotlib
-plt.style.use('seaborn')
+try:
+    plt.style.use('seaborn-v0_8-darkgrid') 
+except OSError:
+    # Fallback or log warning if even the new style isn't found (unlikely)
+    logger.warning("Seaborn style 'seaborn-v0_8-darkgrid' not found. Using default style.")
+    pass # Use default matplotlib style
+
 plt.rcParams['figure.figsize'] = (12, 6)
 
 logger = logging.getLogger(__name__)
