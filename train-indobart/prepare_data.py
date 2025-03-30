@@ -1,6 +1,7 @@
 import argparse
 import os
 import logging
+import time
 from datasets import load_dataset
 from tqdm import tqdm
 
@@ -62,47 +63,97 @@ def main():
     output_file_path = os.path.join(args.output_dir, args.output_filename)
 
     logger.info(f"Loading dataset '{args.corpus_name}' with subset '{args.corpus_subset}'...")
-    try:
-        # Load the dataset streamingly to avoid downloading everything at once if it's huge
-        dataset = load_dataset(
-            args.corpus_name, 
-            args.corpus_subset, 
-            split='train', 
-            streaming=True, # Use streaming mode
-            cache_dir=args.cache_dir
-        )
-        logger.info("Dataset loaded successfully in streaming mode.")
-        
-        # Select a subset if max_samples is specified
-        if args.max_samples:
-             logger.info(f"Processing a maximum of {args.max_samples} samples.")
-             dataset = dataset.take(args.max_samples)
-
-    except Exception as e:
-        logger.error(f"Failed to load dataset: {e}")
-        return
+    
+    # Set up retry logic for network issues
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Load the dataset streamingly to avoid downloading everything at once if it's huge
+            dataset = load_dataset(
+                args.corpus_name, 
+                args.corpus_subset, 
+                split='train', 
+                streaming=True, # Use streaming mode
+                cache_dir=args.cache_dir
+            )
+            logger.info("Dataset loaded successfully in streaming mode.")
+            
+            # Select a subset if max_samples is specified
+            if args.max_samples:
+                 logger.info(f"Processing a maximum of {args.max_samples} samples.")
+                 dataset = dataset.take(args.max_samples)
+            
+            break  # Success, exit the retry loop
+            
+        except Exception as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.warning(f"Attempt {retry_count} failed with error: {e}. Retrying...")
+                time.sleep(5)  # Wait before retrying
+            else:
+                logger.error(f"Failed to load dataset after {max_retries} attempts: {e}")
+                return
 
     logger.info(f"Writing processed text to {output_file_path}...")
     
     # Process and write the data line by line
     lines_written = 0
+    empty_lines = 0
+    invalid_lines = 0
+    start_time = time.time()
+    progress_interval = 10000  # Log progress every 10k lines
+    
     try:
         with open(output_file_path, 'w', encoding='utf-8') as f:
             # Iterate through the dataset (streaming)
             # Wrap with tqdm for progress, note total might be unknown in streaming
-            for example in tqdm(dataset, desc="Processing dataset"): 
-                text = example.get('text', '') # Assuming the text field is named 'text'
+            for i, example in enumerate(tqdm(dataset, desc="Processing dataset")): 
+                # Check if 'text' field exists, try alternative fields if not
+                text = None
+                if 'text' in example:
+                    text = example['text']
+                elif 'content' in example:
+                    text = example['content']
+                elif len(example) > 0:
+                    # Try the first field if it contains text
+                    first_field = list(example.keys())[0]
+                    if isinstance(example[first_field], str):
+                        text = example[first_field]
+                        if i == 0:  # Log this only for the first example
+                            logger.warning(f"'text' field not found, using '{first_field}' instead.")
+                
                 if text and isinstance(text, str):
                     # Basic cleaning: strip whitespace, skip empty lines
                     cleaned_text = text.strip()
                     if cleaned_text:
                         f.write(cleaned_text + '\n')
                         lines_written += 1
+                    else:
+                        empty_lines += 1
+                else:
+                    invalid_lines += 1
+                
+                # Show progress periodically
+                if lines_written > 0 and lines_written % progress_interval == 0:
+                    elapsed = time.time() - start_time
+                    rate = lines_written / elapsed if elapsed > 0 else 0
+                    logger.info(f"Progress: {lines_written} lines written ({rate:.1f} lines/sec)")
                         
-        logger.info(f"Finished writing {lines_written} lines to {output_file_path}.")
+        # Final statistics
+        elapsed_total = time.time() - start_time
+        logger.info(f"Finished processing dataset:")
+        logger.info(f"- Written: {lines_written} valid lines")
+        logger.info(f"- Skipped: {empty_lines} empty lines, {invalid_lines} invalid items")
+        logger.info(f"- Total time: {elapsed_total:.1f} seconds ({lines_written / elapsed_total:.1f} lines/sec)")
+        logger.info(f"Output saved to: {output_file_path}")
 
     except Exception as e:
         logger.error(f"An error occurred during processing or writing: {e}")
+        logger.error(f"Partial output may have been written to {output_file_path}")
 
 if __name__ == "__main__":
+    # Import time for timing operations
+    import time
     main()
