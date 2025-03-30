@@ -631,12 +631,27 @@ def main():
     # Preprocessing the datasets.
     # First we tokenize all the texts.
     if training_args.do_train:
+        # Check if raw_datasets is defined
+        if 'raw_datasets' not in locals() or raw_datasets is None:
+            raise ValueError(
+                "No dataset is available for training. Please provide a dataset_name or train_file."
+            )
         column_names = list(raw_datasets["train"].features) if not data_args.streaming else list(raw_datasets["train"].take(1))[0].keys()
     else:
          if data_args.validation_file is not None:
+             # Check if raw_datasets is defined
+             if 'raw_datasets' not in locals() or raw_datasets is None:
+                 raise ValueError(
+                     "No dataset is available for validation. Please provide a dataset_name or validation_file."
+                 )
              column_names = list(raw_datasets["validation"].features) if not data_args.streaming else list(raw_datasets["validation"].take(1))[0].keys()
          else:
              # Handle case where only evaluation is done and train_file was used for split
+             # Check if raw_datasets is defined
+             if 'raw_datasets' not in locals() or raw_datasets is None:
+                 raise ValueError(
+                     "No dataset is available. Please provide a dataset_name, train_file, or validation_file."
+                 )
              column_names = list(raw_datasets["train"].features) if not data_args.streaming else list(raw_datasets["train"].take(1))[0].keys()
 
     text_column_name = "text" if "text" in column_names else column_names[0]
