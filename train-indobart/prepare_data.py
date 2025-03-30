@@ -53,6 +53,16 @@ def parse_args():
         default=None, # Process all samples by default
         help="Maximum number of text samples to process (for testing/debugging)."
     )
+    parser.add_argument(
+        "--reuse_cache",
+        action="store_true",
+        help="Reuse existing prepared data if available instead of regenerating."
+    )
+    parser.add_argument(
+        "--force_reload",
+        action="store_true",
+        help="Force reload dataset from source instead of using cached version."
+    )
     return parser.parse_args()
 
 def main():
@@ -62,6 +72,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     output_file_path = os.path.join(args.output_dir, args.output_filename)
 
+    # Check if output file already exists and if reuse is enabled
+    if os.path.exists(output_file_path) and args.reuse_cache:
+        file_size = os.path.getsize(output_file_path)
+        if file_size > 0:
+            logger.info(f"Found existing output file at {output_file_path} ({file_size/1024/1024:.2f} MB)")
+            logger.info(f"Skipping dataset preparation as --reuse_cache is enabled")
+            return
+        else:
+            logger.warning(f"Found empty output file at {output_file_path}. Will recreate it.")
+    
     logger.info(f"Loading dataset '{args.corpus_name}' with subset '{args.corpus_subset}'...")
     
     # Set up retry logic for network issues
@@ -76,7 +96,8 @@ def main():
                 args.corpus_subset, 
                 split='train', 
                 streaming=True, # Use streaming mode
-                cache_dir=args.cache_dir
+                cache_dir=args.cache_dir,
+                download_mode="force_redownload" if args.force_reload else None
             )
             logger.info("Dataset loaded successfully in streaming mode.")
             
@@ -148,6 +169,25 @@ def main():
         logger.info(f"- Skipped: {empty_lines} empty lines, {invalid_lines} invalid items")
         logger.info(f"- Total time: {elapsed_total:.1f} seconds ({lines_written / elapsed_total:.1f} lines/sec)")
         logger.info(f"Output saved to: {output_file_path}")
+
+        # Write a cache metadata file to help with future runs
+        cache_metadata = {
+            "timestamp": time.time(),
+            "lines_count": lines_written,
+            "corpus_name": args.corpus_name,
+            "corpus_subset": args.corpus_subset,
+            "max_samples": args.max_samples
+        }
+        
+        # Serialize the metadata to a sidecar file
+        try:
+            import json
+            metadata_path = output_file_path + ".meta.json"
+            with open(metadata_path, 'w') as meta_file:
+                json.dump(cache_metadata, meta_file, indent=2)
+            logger.info(f"Cache metadata written to {metadata_path}")
+        except Exception as e:
+            logger.warning(f"Failed to write cache metadata: {e}")
 
     except Exception as e:
         logger.error(f"An error occurred during processing or writing: {e}")

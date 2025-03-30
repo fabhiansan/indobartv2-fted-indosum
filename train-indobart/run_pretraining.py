@@ -7,6 +7,9 @@ from typing import Optional
 import warnings
 import packaging.version
 
+# Disable wandb logging
+os.environ["WANDB_DISABLED"] = "true"
+
 import datasets
 from datasets import load_dataset
 
@@ -170,11 +173,24 @@ class DataTrainingArguments:
         },
     )
     streaming: bool = field(default=False, metadata={"help": "Enable streaming mode"})
+    use_cached_prep: bool = field(
+        default=False, 
+        metadata={"help": "Use cached preprocessed datasets if available"}
+    )
+    cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory to store cached datasets and preprocessed data"}
+    )
+    force_reload_raw: bool = field(
+        default=False, 
+        metadata={"help": "Force reload raw datasets even if cached version exists"}
+    )
+    save_preprocessed: bool = field(
+        default=True, 
+        metadata={"help": "Save preprocessed datasets to disk to speed up future runs"}
+    )
 
     def __post_init__(self):
-        if self.streaming:
-            if packaging.version.parse(datasets.__version__) < packaging.version.parse("1.1.0"):
-                warnings.warn("Streaming mode may require datasets>=1.1.0")
         if self.dataset_name is None and self.train_file is None and self.validation_file is None:
             raise ValueError("Need either a dataset name or a training/validation file.")
         else:
@@ -429,93 +445,122 @@ def main():
     #
     # In distributed training, the load_dataset function guarantees that only one local process can concurrently
     # download the dataset.
-    if data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-            streaming=data_args.streaming,
-        )
-        if "validation" not in raw_datasets.keys() and not data_args.streaming:
-             # Create validation split if not present
-            raw_datasets["validation"] = load_dataset(
+    preprocessed_dataset_path = None
+    if data_args.use_cached_prep and data_args.cache_dir:
+        cache_key = f"{model_args.model_name_or_path.replace('/', '_')}_{data_args.max_seq_length}"
+        if data_args.train_file:
+            cache_key += f"_{os.path.basename(data_args.train_file)}"
+        elif data_args.dataset_name:
+            cache_key += f"_{data_args.dataset_name}"
+            if data_args.dataset_config_name:
+                cache_key += f"_{data_args.dataset_config_name}"
+                
+        preprocessed_dataset_path = os.path.join(data_args.cache_dir, f"preprocessed_{cache_key}")
+        
+        if os.path.exists(preprocessed_dataset_path) and not data_args.overwrite_cache:
+            try:
+                logger.info(f"Loading preprocessed datasets from {preprocessed_dataset_path}")
+                raw_datasets = datasets.load_from_disk(preprocessed_dataset_path)
+                logger.info("Successfully loaded preprocessed datasets!")
+                
+                # Verify the datasets have the expected splits
+                if "train" not in raw_datasets or (training_args.do_eval and "validation" not in raw_datasets):
+                    logger.warning("Cached dataset doesn't have required splits. Reprocessing dataset.")
+                    preprocessed_dataset_path = None  # Force reprocess
+                else:
+                    # Log dataset stats
+                    logger.info(f"Train dataset size: {len(raw_datasets['train'])}")
+                    if "validation" in raw_datasets:
+                        logger.info(f"Validation dataset size: {len(raw_datasets['validation'])}")
+            except Exception as e:
+                logger.warning(f"Failed to load preprocessed datasets: {e}")
+                preprocessed_dataset_path = None  # Force reprocess
+    
+    # If we don't have valid cached preprocessed datasets, load raw data
+    if not data_args.use_cached_prep or preprocessed_dataset_path is None or data_args.overwrite_cache:
+        logger.info("Loading raw datasets...")
+        start_time = time.time()
+        
+        if data_args.dataset_name is not None:
+            # Downloading and loading a dataset from the hub.
+            raw_datasets = load_dataset(
                 data_args.dataset_name,
                 data_args.dataset_config_name,
-                split=f"train[:{data_args.validation_split_percentage}%]",
                 cache_dir=model_args.cache_dir,
                 token=model_args.token,
                 streaming=data_args.streaming,
+                download_mode="force_redownload" if data_args.force_reload_raw else None,
             )
-            raw_datasets["train"] = load_dataset(
-                data_args.dataset_name,
-                data_args.dataset_config_name,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-                streaming=data_args.streaming,
-            )
-        elif "validation" not in raw_datasets.keys() and data_args.streaming:
-             logger.warning("Streaming mode detected without validation split. Validation will be skipped.")
-             # Cannot easily split in streaming mode without loading everything
-             raw_datasets["validation"] = None 
+            if "validation" not in raw_datasets.keys() and not data_args.streaming:
+                 # Create validation split if not present
+                raw_datasets["validation"] = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split=f"train[:{data_args.validation_split_percentage}%]",
+                    cache_dir=model_args.cache_dir,
+                    token=model_args.token,
+                    streaming=data_args.streaming,
+                    download_mode="force_redownload" if data_args.force_reload_raw else None,
+                )
+                raw_datasets["train"] = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split=f"train[{data_args.validation_split_percentage}%:]",
+                    cache_dir=model_args.cache_dir,
+                    token=model_args.token,
+                    streaming=data_args.streaming,
+                    download_mode="force_redownload" if data_args.force_reload_raw else None,
+                )
+            elif "validation" not in raw_datasets.keys() and data_args.streaming:
+                 logger.warning("Streaming mode detected without validation split. Validation will be skipped.")
+                 # Cannot easily split in streaming mode without loading everything
+                 raw_datasets["validation"] = None 
 
-    else:
-        data_files = {}
-        if data_args.train_file is not None:
-            data_files["train"] = data_args.train_file
-        if data_args.validation_file is not None:
-            data_files["validation"] = data_args.validation_file
-        if hasattr(data_args, 'test_file') and data_args.test_file is not None:
-            data_files["test"] = data_args.test_file
+        else:
+            data_files = {}
+            if data_args.train_file is not None:
+                data_files["train"] = data_args.train_file
+            if data_args.validation_file is not None:
+                data_files["validation"] = data_args.validation_file
+            if hasattr(data_args, 'test_file') and data_args.test_file is not None:
+                data_files["test"] = data_args.test_file
 
-        # Determine the extension from the train file if available, otherwise validation
-        first_file = data_args.train_file or data_args.validation_file
-        if not first_file:
-             raise ValueError("Need at least a train_file or validation_file when dataset_name is not provided.")
-        extension = first_file.split(".")[-1]
-        if extension == "txt":
-            extension = "text" # datasets library uses 'text' for .txt files
-            if hasattr(data_args, 'keep_linebreaks'):
-                dataset_args = {"keep_linebreaks": data_args.keep_linebreaks}
+            # Determine the extension from the train file if available, otherwise validation
+            first_file = data_args.train_file or data_args.validation_file
+            if not first_file:
+                 raise ValueError("Need at least a train_file or validation_file when dataset_name is not provided.")
+            extension = first_file.split(".")[-1]
+            if extension == "txt":
+                extension = "text" # datasets library uses 'text' for .txt files
+                if hasattr(data_args, 'keep_linebreaks'):
+                    dataset_args = {"keep_linebreaks": data_args.keep_linebreaks}
+                else:
+                    dataset_args = {}
             else:
                 dataset_args = {}
-        else:
-            dataset_args = {}
 
-        raw_datasets = load_dataset(
-            extension, # Pass the file type ('text', 'csv', 'json')
-            data_files=data_files,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-            **dataset_args,
-        )
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets.keys():
-            if data_args.validation_split_percentage is None or data_args.validation_split_percentage == 0:
-                raise ValueError(
-                    f"Need either a validation file or a nonzero validation_split_percentage."
+            raw_datasets = load_dataset(
+                extension, # Pass the file type ('text', 'csv', 'json')
+                data_files=data_files,
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args,
+            )
+            # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+            if "validation" not in raw_datasets.keys():
+                if data_args.validation_split_percentage is None or data_args.validation_split_percentage == 0:
+                    raise ValueError(
+                        f"Need either a validation file or a validation_split_percentage greater than 0."
+                    )
+                
+                raw_datasets = raw_datasets["train"].train_test_split(
+                    test_size=data_args.validation_split_percentage / 100
                 )
-            raw_datasets["validation"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[:{data_args.validation_split_percentage}%]",
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-                **dataset_args,
-            )
-            raw_datasets["train"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-                **dataset_args,
-            )
-
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc)
-    # in https://huggingface.co/docs/datasets/loading_datasets.html.
+                raw_datasets["train"] = raw_datasets["train"]
+                raw_datasets["validation"] = raw_datasets["test"]
+                del raw_datasets["test"]
+                
+        logger.info(f"Raw datasets loaded in {time.time() - start_time:.2f} seconds")
 
     # Load pretrained model and tokenizer
     #
@@ -799,6 +844,39 @@ def main():
     # else:
     #     trainer.create_model_card(**kwargs)
 
+    # Log a few random samples from the training set:
+    if training_args.do_train:
+        logger.info(f"Tokenization complete in {time.time() - tokenization_start_time:.2f} seconds")
+        
+        # Save preprocessed datasets to disk if requested
+        if data_args.save_preprocessed and data_args.cache_dir and not data_args.streaming:
+            try:
+                os.makedirs(data_args.cache_dir, exist_ok=True)
+                logger.info(f"Saving preprocessed datasets to {preprocessed_dataset_path}")
+                tokenized_datasets.save_to_disk(preprocessed_dataset_path)
+                
+                # Save metadata about this preprocessing
+                with open(os.path.join(preprocessed_dataset_path, "preprocessing_info.json"), "w") as f:
+                    json.dump({
+                        "timestamp": time.time(),
+                        "model_name": model_args.model_name_or_path,
+                        "max_seq_length": data_args.max_seq_length,
+                        "padding": "max_length" if data_args.pad_to_max_length else "longest",
+                        "line_by_line": data_args.line_by_line,
+                        "mlm_probability": data_args.mlm_probability,
+                    }, f, indent=2)
+                logger.info("Preprocessing data cached successfully")
+            except Exception as e:
+                logger.warning(f"Failed to save preprocessed datasets: {e}")
+        
+        for index in random.sample(range(len(tokenized_datasets["train"])), min(3, len(tokenized_datasets["train"]))):
+            logger.info(f"Sample {index} of the training set:")
+            for key in tokenized_datasets["train"][index]:
+                if key != "attention_mask":  # Skip attention mask for brevity
+                    value = tokenized_datasets["train"][index][key]
+                    if isinstance(value, list) and len(value) > 20:
+                        value = str(value[:20]) + "... (truncated)"
+                    logger.info(f"  {key}: {value}")
 
 if __name__ == "__main__":
     main()

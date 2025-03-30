@@ -22,6 +22,11 @@ CORPUS_NAME="oscar"
 CORPUS_SUBSET="unshuffled_deduplicated_id"
 MAX_SAMPLES=1000000 # Optional: Limit dataset size for testing (e.g., 1000000). Remove or set to large number for full run.
 
+# Cache parameters
+CACHE_DIR="$DATA_DIR/cache"  # Directory to store cached datasets and preprocessed data
+REUSE_CACHE=true  # Set to false to force regenerate all data even if cached
+FORCE_RELOAD=false  # Set to true to force reload datasets from source
+
 # Tokenizer parameters
 TOKENIZER_DIR="./tokenizer"
 VOCAB_SIZE=50265
@@ -50,121 +55,127 @@ if [ -d "$DATA_DIR" ] || [ -d "$TOKENIZER_DIR" ] || [ -d "$OUTPUT_DIR" ]; then
     [ -d "$TOKENIZER_DIR" ] && echo "- $TOKENIZER_DIR"
     [ -d "$OUTPUT_DIR" ] && echo "- $OUTPUT_DIR"
     
-    read -p "Do you want to continue and potentially overwrite existing data? (y/n): " choice
-    case "$choice" in
-        y|Y ) echo "Continuing with the script...";;
-        * ) echo "Operation cancelled by user."; exit 0;;
-    esac
+    read -p "Do you want to continue? Existing files may be used from cache if enabled. (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        echo "Operation aborted by user."
+        exit 0
+    fi
 fi
 
-# Create directories if they don't exist
+# Make sure all necessary directories exist
 mkdir -p "$DATA_DIR"
+mkdir -p "$CACHE_DIR"
 mkdir -p "$TOKENIZER_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-# --- Step 1: Prepare Data ---
-echo "--- Preparing Data --- "
+# --- Step 1: Download and prepare the dataset ---
+echo "Step 1: Preparing dataset..."
+
+# Prepare cache arguments based on settings
+CACHE_ARGS=""
+if [ "$REUSE_CACHE" = true ]; then
+    CACHE_ARGS="$CACHE_ARGS --reuse_cache"
+    echo "Reuse cache enabled: Will use existing data files if available"
+fi
+
+if [ "$FORCE_RELOAD" = true ]; then
+    CACHE_ARGS="$CACHE_ARGS --force_reload"
+    echo "Force reload enabled: Will reload data from source"
+fi
+
+# Prepare the data (this will download the corpus if needed)
 python prepare_data.py \
     --corpus_name "$CORPUS_NAME" \
     --corpus_subset "$CORPUS_SUBSET" \
     --output_dir "$DATA_DIR" \
-    --output_filename "$(basename $PREPARED_DATA_FILE)" \
-    ${MAX_SAMPLES:+ --max_samples $MAX_SAMPLES} # Add max_samples only if set
+    --output_filename "$(basename "$PREPARED_DATA_FILE")" \
+    --cache_dir "$CACHE_DIR" \
+    --max_samples "$MAX_SAMPLES" \
+    $CACHE_ARGS
 
-echo "--- Data Preparation Complete. Output: $PREPARED_DATA_FILE ---"
-
-# Check that the data file exists and is not empty
+# Validate the prepared data exists
 if [ ! -f "$PREPARED_DATA_FILE" ]; then
-    echo "Error: Data file $PREPARED_DATA_FILE does not exist. Data preparation failed."
+    echo "Error: Prepared data file not found at $PREPARED_DATA_FILE"
     exit 1
 fi
 
-if [ ! -s "$PREPARED_DATA_FILE" ]; then
-    echo "Error: Data file $PREPARED_DATA_FILE is empty. Data preparation may have failed."
-    exit 1
-fi
+echo "Dataset preparation complete. File saved to $PREPARED_DATA_FILE"
+FILESIZE=$(du -h "$PREPARED_DATA_FILE" | cut -f1)
+echo "File size: $FILESIZE"
 
-echo "Data file check passed: $PREPARED_DATA_FILE exists and is not empty."
-echo "File size: $(du -h "$PREPARED_DATA_FILE" | cut -f1)"
+# --- Step 2: Train the tokenizer ---
+echo -e "\nStep 2: Training tokenizer..."
 
-# --- Step 2: Train Tokenizer ---
-echo "--- Training Tokenizer --- "
-python train_tokenizer.py \
-    --input_files "$PREPARED_DATA_FILE" \
-    --output_dir "$TOKENIZER_DIR" \
-    --vocab_size $VOCAB_SIZE \
-    --min_frequency $MIN_FREQUENCY
-
-echo "--- Tokenizer Training Complete. Output: $TOKENIZER_DIR ---"
-
-# Check that the tokenizer files exist
-if [ ! -f "$TOKENIZER_DIR/vocab.json" ] || [ ! -f "$TOKENIZER_DIR/merges.txt" ]; then
-    echo "Error: Tokenizer files (vocab.json and merges.txt) not found in $TOKENIZER_DIR."
-    echo "Tokenizer training may have failed."
-    exit 1
-fi
-
-echo "Tokenizer check passed: vocab.json and merges.txt found in $TOKENIZER_DIR"
-
-# --- Step 3: Run Pre-training ---
-echo "--- Starting Pre-training --- "
-
-# Determine if accelerate is available and use it
-if command -v accelerate &> /dev/null
-then
-    echo "Using accelerate for distributed training (if applicable)..."
-    ACCELERATE_CMD="accelerate launch"
+# Check if tokenizer already exists and is valid
+if [ -f "$TOKENIZER_DIR/vocab.json" ] && [ -f "$TOKENIZER_DIR/merges.txt" ] && [ "$REUSE_CACHE" = true ]; then
+    echo "Existing tokenizer found. Skipping tokenizer training as cache reuse is enabled."
 else
-    echo "accelerate not found. Running with python..."
-    ACCELERATE_CMD="python"
+    echo "Training new tokenizer..."
+    python train_tokenizer.py \
+        --input_file "$PREPARED_DATA_FILE" \
+        --output_dir "$TOKENIZER_DIR" \
+        --vocab_size "$VOCAB_SIZE" \
+        --min_frequency "$MIN_FREQUENCY"
+    
+    # Validate the tokenizer files exist
+    if [ ! -f "$TOKENIZER_DIR/vocab.json" ] || [ ! -f "$TOKENIZER_DIR/merges.txt" ]; then
+        echo "Error: Tokenizer files not found after training"
+        exit 1
+    fi
 fi
 
-# Check if CUDA is available for GPU training
-CUDA_AVAILABLE=false
-if python -c "import torch; print(torch.cuda.is_available())" | grep -q "True"; then
-    CUDA_AVAILABLE=true
-    NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
-    echo "CUDA is available. Using $NUM_GPUS GPU(s)."
+echo "Tokenizer ready at $TOKENIZER_DIR"
+
+# --- Step 3: Pre-train the BART model ---
+echo -e "\nStep 3: Pre-training the BART model..."
+
+# Set up distributed training command if needed (for multi-GPU)
+if command -v accelerate &> /dev/null; then
+    ACCELERATE_CMD="accelerate"
+    echo "Using Accelerate for distributed training"
 else
-    echo "CUDA is not available. Using CPU for training (this will be slow)."
-    # Disable FP16 if using CPU
-    FP16=false
+    ACCELERATE_CMD=""
+    echo "Running in single device mode (no Accelerate detected)"
 fi
 
+# Add cache arguments for pretraining
+PRETRAINING_CACHE_ARGS=""
+if [ "$REUSE_CACHE" = true ]; then
+    PRETRAINING_CACHE_ARGS="$PRETRAINING_CACHE_ARGS --use_cached_prep --cache_dir $CACHE_DIR"
+    echo "Using cached preprocessed datasets if available"
+fi
+
+if [ "$FORCE_RELOAD" = true ]; then
+    PRETRAINING_CACHE_ARGS="$PRETRAINING_CACHE_ARGS --force_reload_raw"
+    echo "Forcing reload of raw datasets"
+fi
+
+# Start pretraining
 $ACCELERATE_CMD run_pretraining.py \
     --model_name_or_path "$BASE_MODEL" \
     --tokenizer_name_or_path "$TOKENIZER_DIR" \
     --train_file "$PREPARED_DATA_FILE" \
     --output_dir "$OUTPUT_DIR" \
+    --overwrite_output_dir \
     --do_train \
     --do_eval \
-    --validation_split_percentage 5 \
-    --per_device_train_batch_size $PER_DEVICE_BATCH_SIZE \
-    --per_device_eval_batch_size $PER_DEVICE_BATCH_SIZE \
-    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
-    --learning_rate $LEARNING_RATE \
-    --num_train_epochs $NUM_EPOCHS \
-    --warmup_steps $WARMUP_STEPS \
-    --logging_steps $LOGGING_STEPS \
-    --save_steps $SAVE_STEPS \
-    --eval_steps $EVAL_STEPS \
-    --evaluation_strategy "steps" \
-    --save_total_limit 5 \
-    --max_seq_length $MAX_SEQ_LENGTH \
-    --overwrite_output_dir \
-    --preprocessing_num_workers $(nproc) \
-    --seed 42 \
+    --max_seq_length "$MAX_SEQ_LENGTH" \
+    --per_device_train_batch_size "$PER_DEVICE_BATCH_SIZE" \
+    --gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS" \
+    --learning_rate "$LEARNING_RATE" \
+    --warmup_steps "$WARMUP_STEPS" \
+    --num_train_epochs "$NUM_EPOCHS" \
+    --save_steps "$SAVE_STEPS" \
+    --save_total_limit 3 \
+    --evaluation_strategy steps \
+    --eval_steps "$EVAL_STEPS" \
+    --logging_steps "$LOGGING_STEPS" \
+    --fp16 "$FP16" \
+    --load_best_model_at_end \
     --bart_objective true \
-    $(if [ "$FP16" = true ]; then echo "--fp16"; fi) # Add --fp16 only if FP16 is true
-    # --line_by_line # Uncomment if you prefer line-by-line processing instead of grouping
+    --masking_fraction 0.3 \
+    --poisson_lambda 3.0 \
+    $PRETRAINING_CACHE_ARGS
 
-# Check if training completed successfully
-if [ ! -f "$OUTPUT_DIR/pytorch_model.bin" ]; then
-    echo "Warning: Model checkpoint (pytorch_model.bin) not found in $OUTPUT_DIR."
-    echo "Pre-training may have failed or is not yet complete."
-    exit 1
-fi
-
-echo "--- Pre-training Complete. Model saved in: $OUTPUT_DIR ---"
-echo "Model files:"
-ls -lh "$OUTPUT_DIR"
+echo -e "\nPre-training complete! Model saved to $OUTPUT_DIR"
+echo "You can now use this model for fine-tuning on downstream tasks."
