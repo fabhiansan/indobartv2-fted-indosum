@@ -524,6 +524,10 @@ def main():
     # In distributed training, the load_dataset function guarantees that only one local process can concurrently
     # download the dataset.
     preprocessed_dataset_path = None
+    
+    # Initialize raw_datasets to None to ensure it's always defined
+    raw_datasets = None
+    
     if data_args.use_cached_prep and data_args.dataset_cache_dir:
         # Convert to absolute path if needed
         dataset_cache_dir = data_args.dataset_cache_dir
@@ -673,6 +677,14 @@ def main():
             logger.info(f"Dataset arguments: {dataset_args}")
 
             try:
+                logger.info(f"About to load dataset with: extension={extension}, data_files={data_files}, cache_dir={cache_dir}")
+                
+                # Add extra debugging - check if file is accessible and readable
+                for split_name, file_path in data_files.items():
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                        logger.info(f"Successfully read first line from {split_name} file: '{first_line[:50]}...'")
+                
                 raw_datasets = load_dataset(
                     extension,  # Pass the file type ('text', 'csv', 'json')
                     data_files=data_files,
@@ -694,6 +706,15 @@ def main():
                 raise ValueError(f"Failed to load dataset: {str(e)}")
 
         logger.info(f"Raw datasets loaded in {time.time() - start_time:.2f} seconds")
+
+    # Verify raw_datasets was actually loaded
+    if raw_datasets is None:
+        logger.error("Dataset loading failed - raw_datasets is None")
+        logger.error(f"train_file: {data_args.train_file}")
+        logger.error(f"dataset_name: {data_args.dataset_name}")
+        raise ValueError(
+            f"No dataset is available for training. Please provide a valid dataset_name or train_file."
+        )
 
     # Load pretrained model and tokenizer
     #
@@ -840,41 +861,41 @@ def main():
                     remove_columns=column_names,
                 )
 
-        # Main data processing function that will concatenate all texts from our dataset and generate chunks of
-        # max_seq_length.
-        block_size = data_args.max_seq_length
+    # Main data processing function that will concatenate all texts from our dataset and generate chunks of
+    # max_seq_length.
+    block_size = data_args.max_seq_length
 
-        def group_texts(examples):
-            # Concatenate all texts.
-            concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
-            total_length = len(concatenated_examples[list(examples.keys())[0]])
-            # We drop the small remainder, we could add padding if the model supported it instead of this drop,
-            # you can customize this part to your needs.
-            if total_length >= block_size:
-                total_length = (total_length // block_size) * block_size
-            # Split by chunks of max_len.
-            result = {
-                k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-                for k, t in concatenated_examples.items()
-            }
-            return result
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop,
+        # you can customize this part to your needs.
+        if total_length >= block_size:
+            total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        return result
 
-        # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a
-        # remainder for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value
-        # might be slower to preprocess. To speed up this part, we use multiprocessing.
-        with training_args.main_process_first(desc="grouping texts together"):
-            if not data_args.streaming:
-                tokenized_datasets = tokenized_datasets.map(
-                    group_texts,
-                    batched=True,
-                    num_proc=data_args.preprocessing_num_workers,
-                    load_from_cache_file=not data_args.overwrite_cache,
-                    desc=f"Grouping texts in chunks of {block_size}",
-                )
-            else:
-                tokenized_datasets = tokenized_datasets.map(
-                    group_texts, batched=True
-                )
+    # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a
+    # remainder for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value
+    # might be slower to preprocess. To speed up this part, we use multiprocessing.
+    with training_args.main_process_first(desc="grouping texts together"):
+        if not data_args.streaming:
+            tokenized_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc=f"Grouping texts in chunks of {block_size}",
+            )
+        else:
+            tokenized_datasets = tokenized_datasets.map(
+                group_texts, batched=True
+            )
 
     if training_args.do_train:
         if "train" not in tokenized_datasets:
