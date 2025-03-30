@@ -311,27 +311,54 @@ def main():
         data_files = {}
         if data_args.train_file is not None:
             data_files["train"] = data_args.train_file
-            extension = data_args.train_file.split(".")[-1]
         if data_args.validation_file is not None:
             data_files["validation"] = data_args.validation_file
-            extension = data_args.validation_file.split(".")[-1]
-        else: # Auto create validation from train if validation file not provided
-            extension = data_args.train_file.split(".")[-1]
-            if not data_args.streaming:
-                 # Need to load the dataset to split in non-streaming mode
-                temp_dataset = load_dataset(extension, data_files={"train": data_args.train_file}, cache_dir=model_args.cache_dir)
-                split_dataset = temp_dataset["train"].train_test_split(test_size=f"{data_args.validation_split_percentage}%", seed=training_args.seed)
-                raw_datasets = datasets.DatasetDict({
-                    "train": split_dataset["train"],
-                    "validation": split_dataset["test"]
-                })
-            else:
-                logger.warning("Streaming mode detected without validation file. Validation will be skipped.")
-                raw_datasets = load_dataset(extension, data_files=data_files, cache_dir=model_args.cache_dir, token=model_args.token, streaming=True)
-                raw_datasets["validation"] = None
+        if data_args.test_file is not None:
+            data_files["test"] = data_args.test_file
 
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
+        # Determine the extension from the train file if available, otherwise validation
+        first_file = data_args.train_file or data_args.validation_file
+        if not first_file:
+             raise ValueError("Need at least a train_file or validation_file when dataset_name is not provided.")
+        extension = first_file.split(".")[-1]
+        if extension == "txt":
+            extension = "text" # datasets library uses 'text' for .txt files
+            dataset_args = {"keep_linebreaks": data_args.keep_linebreaks}
+        else:
+            dataset_args = {}
+
+        raw_datasets = load_dataset(
+            extension, # Pass the file type ('text', 'csv', 'json')
+            data_files=data_files,
+            cache_dir=model_args.cache_dir,
+            token=model_args.token,
+            **dataset_args,
+        )
+        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+        if "validation" not in raw_datasets.keys():
+            if data_args.validation_split_percentage is None or data_args.validation_split_percentage == 0:
+                raise ValueError(
+                    f"Need either a validation file or a nonzero validation_split_percentage."
+                )
+            raw_datasets["validation"] = load_dataset(
+                extension,
+                data_files=data_files,
+                split=f"train[:{data_args.validation_split_percentage}%]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args,
+            )
+            raw_datasets["train"] = load_dataset(
+                extension,
+                data_files=data_files,
+                split=f"train[{data_args.validation_split_percentage}%:]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args,
+            )
+
+    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc)
+    # in https://huggingface.co/docs/datasets/loading_datasets.html.
 
     # Load pretrained model and tokenizer
     #
