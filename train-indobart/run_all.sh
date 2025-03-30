@@ -131,7 +131,7 @@ echo -e "\nStep 3: Pre-training the BART model..."
 
 # Set up distributed training command if needed (for multi-GPU)
 if command -v accelerate &> /dev/null; then
-    ACCELERATE_CMD="accelerate"
+    ACCELERATE_CMD="accelerate launch"
     echo "Using Accelerate for distributed training"
 else
     ACCELERATE_CMD=""
