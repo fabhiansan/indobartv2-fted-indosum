@@ -177,7 +177,7 @@ class DataTrainingArguments:
         default=False, 
         metadata={"help": "Use cached preprocessed datasets if available"}
     )
-    cache_dir: Optional[str] = field(
+    dataset_cache_dir: Optional[str] = field(
         default=None,
         metadata={"help": "Directory to store cached datasets and preprocessed data"}
     )
@@ -446,7 +446,7 @@ def main():
     # In distributed training, the load_dataset function guarantees that only one local process can concurrently
     # download the dataset.
     preprocessed_dataset_path = None
-    if data_args.use_cached_prep and data_args.cache_dir:
+    if data_args.use_cached_prep and data_args.dataset_cache_dir:
         cache_key = f"{model_args.model_name_or_path.replace('/', '_')}_{data_args.max_seq_length}"
         if data_args.train_file:
             cache_key += f"_{os.path.basename(data_args.train_file)}"
@@ -455,7 +455,7 @@ def main():
             if data_args.dataset_config_name:
                 cache_key += f"_{data_args.dataset_config_name}"
                 
-        preprocessed_dataset_path = os.path.join(data_args.cache_dir, f"preprocessed_{cache_key}")
+        preprocessed_dataset_path = os.path.join(data_args.dataset_cache_dir, f"preprocessed_{cache_key}")
         
         if os.path.exists(preprocessed_dataset_path) and not data_args.overwrite_cache:
             try:
@@ -849,9 +849,9 @@ def main():
         logger.info(f"Tokenization complete in {time.time() - tokenization_start_time:.2f} seconds")
         
         # Save preprocessed datasets to disk if requested
-        if data_args.save_preprocessed and data_args.cache_dir and not data_args.streaming:
+        if data_args.save_preprocessed and data_args.dataset_cache_dir and not data_args.streaming:
             try:
-                os.makedirs(data_args.cache_dir, exist_ok=True)
+                os.makedirs(data_args.dataset_cache_dir, exist_ok=True)
                 logger.info(f"Saving preprocessed datasets to {preprocessed_dataset_path}")
                 tokenized_datasets.save_to_disk(preprocessed_dataset_path)
                 

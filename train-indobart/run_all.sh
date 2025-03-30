@@ -141,7 +141,7 @@ fi
 # Add cache arguments for pretraining
 PRETRAINING_CACHE_ARGS=""
 if [ "$REUSE_CACHE" = true ]; then
-    PRETRAINING_CACHE_ARGS="$PRETRAINING_CACHE_ARGS --use_cached_prep --cache_dir $CACHE_DIR"
+    PRETRAINING_CACHE_ARGS="$PRETRAINING_CACHE_ARGS --use_cached_prep --dataset_cache_dir $CACHE_DIR"
     echo "Using cached preprocessed datasets if available"
 fi
 
