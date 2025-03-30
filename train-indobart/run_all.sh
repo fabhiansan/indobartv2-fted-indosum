@@ -129,13 +129,22 @@ echo "Tokenizer ready at $TOKENIZER_DIR"
 # --- Step 3: Pre-train the BART model ---
 echo -e "\nStep 3: Pre-training the BART model..."
 
-# Set up distributed training command if needed (for multi-GPU)
-if command -v accelerate &> /dev/null; then
-    ACCELERATE_CMD="accelerate launch"
-    echo "Using Accelerate for distributed training"
+# Count available GPUs
+if command -v nvidia-smi &> /dev/null; then
+    GPU_COUNT=$(nvidia-smi --list-gpus | wc -l)
+    echo "Detected $GPU_COUNT GPU(s)"
 else
-    ACCELERATE_CMD=""
-    echo "Running in single device mode (no Accelerate detected)"
+    GPU_COUNT=0
+    echo "No NVIDIA GPUs detected"
+fi
+
+# Set up distributed training command based on GPU count
+if [ $GPU_COUNT -gt 1 ] && command -v accelerate &> /dev/null; then
+    LAUNCH_CMD="accelerate launch"
+    echo "Using Accelerate for multi-GPU training ($GPU_COUNT GPUs)"
+else
+    LAUNCH_CMD="python"
+    echo "Running in single device mode"
 fi
 
 # Add cache arguments for pretraining
@@ -150,8 +159,16 @@ if [ "$FORCE_RELOAD" = true ]; then
     echo "Forcing reload of raw datasets"
 fi
 
+# Confirm train file exists before starting
+if [ ! -f "$PREPARED_DATA_FILE" ]; then
+    echo "ERROR: Train file not found at $PREPARED_DATA_FILE"
+    exit 1
+else
+    echo "Confirmed train file exists at $PREPARED_DATA_FILE ($(du -h "$PREPARED_DATA_FILE" | cut -f1))"
+fi
+
 # Start pretraining
-$ACCELERATE_CMD run_pretraining.py \
+$LAUNCH_CMD run_pretraining.py \
     --model_name_or_path "$BASE_MODEL" \
     --tokenizer_name_or_path "$TOKENIZER_DIR" \
     --train_file "$PREPARED_DATA_FILE" \

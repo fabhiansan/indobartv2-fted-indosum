@@ -440,6 +440,44 @@ def main():
             dist.barrier()
             logger.info(f"Rank {training_args.local_rank} passed barrier")
 
+    # For all processes, ensure file paths are properly resolved (not just for distributed training)
+    # This ensures consistency regardless of the execution environment
+    if data_args.train_file:
+        # Convert to absolute path if needed
+        if not os.path.isabs(data_args.train_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            orig_path = data_args.train_file
+            data_args.train_file = os.path.normpath(os.path.join(script_dir, data_args.train_file))
+            logger.info(f"Resolved relative train file path '{orig_path}' to absolute path: {data_args.train_file}")
+        
+        # Verify file existence with detailed logging
+        if not os.path.exists(data_args.train_file):
+            parent_dir = os.path.dirname(data_args.train_file)
+            logger.error(f"Train file not found at: {data_args.train_file}")
+            logger.error(f"Current working directory: {os.getcwd()}")
+            if os.path.exists(parent_dir):
+                logger.error(f"Parent directory exists. Contents: {os.listdir(parent_dir)}")
+            else:
+                logger.error(f"Parent directory {parent_dir} does not exist")
+            raise FileNotFoundError(f"Train file not found at: {data_args.train_file}")
+        else:
+            file_size = os.path.getsize(data_args.train_file)
+            logger.info(f"Train file found at: {data_args.train_file} (Size: {file_size} bytes)")
+    
+    if data_args.validation_file:
+        # Convert to absolute path if needed
+        if not os.path.isabs(data_args.validation_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            orig_path = data_args.validation_file
+            data_args.validation_file = os.path.normpath(os.path.join(script_dir, data_args.validation_file))
+            logger.info(f"Resolved relative validation file path '{orig_path}' to absolute path: {data_args.validation_file}")
+        
+        # Verify file existence
+        if not os.path.exists(data_args.validation_file):
+            logger.warning(f"Validation file not found at: {data_args.validation_file}")
+        else:
+            logger.info(f"Validation file found at: {data_args.validation_file}")
+
     if training_args.should_log:
         # The default of training_args.log_level is passive, so we set log level at info here to have that default.
         transformers.utils.logging.set_verbosity_info()
