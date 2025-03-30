@@ -447,6 +447,15 @@ def main():
     # download the dataset.
     preprocessed_dataset_path = None
     if data_args.use_cached_prep and data_args.dataset_cache_dir:
+        # Convert to absolute path if needed
+        dataset_cache_dir = data_args.dataset_cache_dir
+        if not os.path.isabs(dataset_cache_dir):
+            dataset_cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), dataset_cache_dir)
+            logger.info(f"Using resolved absolute path for dataset cache: {dataset_cache_dir}")
+            
+        # Create cache directory if it doesn't exist
+        os.makedirs(dataset_cache_dir, exist_ok=True)
+            
         cache_key = f"{model_args.model_name_or_path.replace('/', '_')}_{data_args.max_seq_length}"
         if data_args.train_file:
             cache_key += f"_{os.path.basename(data_args.train_file)}"
@@ -455,7 +464,7 @@ def main():
             if data_args.dataset_config_name:
                 cache_key += f"_{data_args.dataset_config_name}"
                 
-        preprocessed_dataset_path = os.path.join(data_args.dataset_cache_dir, f"preprocessed_{cache_key}")
+        preprocessed_dataset_path = os.path.join(dataset_cache_dir, f"preprocessed_{cache_key}")
         
         if os.path.exists(preprocessed_dataset_path) and not data_args.overwrite_cache:
             try:
@@ -519,23 +528,35 @@ def main():
         else:
             data_files = {}
             if data_args.train_file is not None:
+                # Convert to absolute path if needed
+                train_file = data_args.train_file
+                if not os.path.isabs(train_file):
+                    train_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), train_file)
+                    logger.info(f"Using resolved absolute path for train file: {train_file}")
+                
                 # Add debug information about file existence
-                if not os.path.exists(data_args.train_file):
-                    logger.error(f"Train file not found at path: {data_args.train_file}")
+                if not os.path.exists(train_file):
+                    logger.error(f"Train file not found at path: {train_file}")
                     logger.error(f"Current working directory: {os.getcwd()}")
-                    logger.error(f"Absolute path attempted: {os.path.abspath(data_args.train_file)}")
-                    raise ValueError(f"Train file not found at path: {data_args.train_file}")
+                    logger.error(f"Original train file path: {data_args.train_file}")
+                    raise ValueError(f"Train file not found at path: {train_file}")
                 else:
-                    logger.info(f"Train file found at: {data_args.train_file}")
-                    logger.info(f"File size: {os.path.getsize(data_args.train_file)} bytes")
-                data_files["train"] = data_args.train_file
+                    logger.info(f"Train file found at: {train_file}")
+                    logger.info(f"File size: {os.path.getsize(train_file)} bytes")
+                data_files["train"] = train_file
             if data_args.validation_file is not None:
+                # Convert to absolute path if needed
+                validation_file = data_args.validation_file
+                if not os.path.isabs(validation_file):
+                    validation_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), validation_file)
+                    logger.info(f"Using resolved absolute path for validation file: {validation_file}")
+                
                 # Add debug information about file existence
-                if not os.path.exists(data_args.validation_file):
-                    logger.error(f"Validation file not found at path: {data_args.validation_file}")
+                if not os.path.exists(validation_file):
+                    logger.error(f"Validation file not found at path: {validation_file}")
                 else:
-                    logger.info(f"Validation file found at: {data_args.validation_file}")
-                data_files["validation"] = data_args.validation_file
+                    logger.info(f"Validation file found at: {validation_file}")
+                data_files["validation"] = validation_file
             if hasattr(data_args, 'test_file') and data_args.test_file is not None:
                 data_files["test"] = data_args.test_file
 
