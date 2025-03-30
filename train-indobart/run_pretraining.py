@@ -201,6 +201,160 @@ class BartObjectiveArguments:
     )
 
 
+@dataclass
+class DataCollatorForBartSeq2Seq:
+    """
+    Data collator for BART sequence-to-sequence pre-training (text infilling).
+    Reference: BART Paper (https://arxiv.org/abs/1910.13461)
+    Adapated from similar implementations found online.
+    """
+    tokenizer: BartTokenizerFast
+    masking_fraction: float # Fraction of tokens to mask
+    poisson_lambda: float # Lambda for span length sampling
+    pad_to_multiple_of: Optional[int] = None
+    ignore_pad_token_for_loss: bool = True
+
+    def __call__(self, examples):
+        import torch
+        import numpy as np
+        import random
+        
+        # If batch is a list of dicts with 'text', process them
+        if isinstance(examples[0], dict) and "text" in examples[0]:
+            batch = self.tokenizer( # Tokenize the inputs
+                [ex["text"] for ex in examples], 
+                return_tensors="pt", 
+                padding="longest", 
+                truncation=True, 
+                max_length=self.tokenizer.model_max_length
+            )
+        else:
+            # Assume this is already a batch from the tokenized dataset
+            batch = {
+                k: torch.stack([torch.tensor(ex[k]) for ex in examples])
+                if examples[0][k] is not None and isinstance(examples[0][k], list)
+                else torch.tensor([ex[k] for ex in examples])
+                for k in examples[0].keys()
+            }
+        
+        input_ids = batch["input_ids"]
+        batch["labels"] = input_ids.clone() # Labels are the original uncorrupted sequence
+
+        # Perform BART's text infilling corruption
+        masked_input_ids = input_ids.clone()
+        
+        # Get mask of special tokens to avoid masking them
+        special_tokens_mask = batch.get("special_tokens_mask", None)
+        if special_tokens_mask is None:
+            special_tokens_mask = [
+                self.tokenizer.get_special_tokens_mask(ids, already_has_special_tokens=True)
+                for ids in input_ids.tolist()
+            ]
+            special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+        
+        # Create new attention masks and decoder input ids tensors
+        attention_mask = batch.get("attention_mask", 
+                           (input_ids != self.tokenizer.pad_token_id).long())
+        
+        # Create decoder input ids (BART uses shifted input for decoder)
+        decoder_input_ids = torch.zeros_like(input_ids)
+        
+        # For each sequence in the batch
+        for i in range(input_ids.size(0)):
+            # Exclude padding and special tokens from potential masking
+            seq_length = attention_mask[i].sum().item()
+            if seq_length <= 2:  # Skip very short sequences (just BOS/EOS)
+                continue
+                
+            non_special_indices = torch.nonzero(
+                (~special_tokens_mask[i]) & 
+                (input_ids[i] != self.tokenizer.pad_token_id),
+                as_tuple=False
+            ).squeeze()
+            
+            if len(non_special_indices) == 0:
+                continue
+
+            # BART paper masks ~30% of tokens
+            n_tokens_to_mask = int(np.ceil(len(non_special_indices) * self.masking_fraction))
+            if n_tokens_to_mask == 0:
+                continue
+
+            # Track which tokens are masked/deleted
+            deleted_indices = set()
+            
+            # Keep selecting spans until we've masked enough tokens
+            while len(deleted_indices) < n_tokens_to_mask:
+                # Sample span length from Poisson distribution (λ=3)
+                span_length = np.random.poisson(self.poisson_lambda)
+                span_length = max(1, span_length)  # Ensure at least length 1
+                
+                # If we have too few tokens left to mask, just use what's available
+                if len(deleted_indices) + span_length > n_tokens_to_mask:
+                    span_length = n_tokens_to_mask - len(deleted_indices)
+                    
+                # Find available positions (not already masked/deleted)
+                available_indices = [idx.item() for idx in non_special_indices 
+                                   if idx.item() not in deleted_indices]
+                if not available_indices:
+                    break
+                
+                # Select random start position for the span
+                start_idx = random.choice(available_indices)
+                
+                # Determine end of span (ensuring we don't go beyond sequence or mask too many tokens)
+                end_idx = min(start_idx + span_length, seq_length - 1)
+                
+                # Check if we're not trying to mask special tokens
+                span_indices = list(range(start_idx, end_idx))
+                span_indices = [idx for idx in span_indices 
+                              if not special_tokens_mask[i, idx] and idx not in deleted_indices]
+                
+                if not span_indices:
+                    continue
+                
+                # Replace the first token with <mask>
+                first_idx = span_indices[0]
+                masked_input_ids[i, first_idx] = self.tokenizer.mask_token_id
+                
+                # Mark all tokens in span as deleted (except the first one we masked)
+                for idx in span_indices[1:]:
+                    deleted_indices.add(idx)
+            
+            # Now we need to actually delete the tokens marked for deletion
+            # This is more complex as we need to shift tokens left
+            if deleted_indices:
+                deleted_indices = sorted(list(deleted_indices))
+                new_seq = []
+                
+                # Keep only non-deleted tokens
+                for j in range(seq_length):
+                    if j not in deleted_indices:
+                        new_seq.append(masked_input_ids[i, j].item())
+                
+                # Pad to original length
+                new_seq = new_seq + [self.tokenizer.pad_token_id] * len(deleted_indices)
+                
+                # Update the masked sequence
+                masked_input_ids[i, :seq_length] = torch.tensor(new_seq[:seq_length])
+            
+            # Create proper decoder input for sequence-to-sequence task
+            # Shift the target right and prepend BOS token
+            decoder_input_ids[i, 0] = self.tokenizer.bos_token_id
+            decoder_input_ids[i, 1:seq_length] = batch["labels"][i, :seq_length-1]
+        
+        # Update with corrupted input ids and recalculate attention mask
+        batch["input_ids"] = masked_input_ids
+        batch["attention_mask"] = (masked_input_ids != self.tokenizer.pad_token_id).long()
+        batch["decoder_input_ids"] = decoder_input_ids
+        
+        # Ignore padding tokens in labels
+        if self.ignore_pad_token_for_loss:
+            batch["labels"][batch["labels"] == self.tokenizer.pad_token_id] = -100
+
+        return batch
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -582,159 +736,6 @@ def main():
             mlm_probability=data_args.mlm_probability,
             pad_to_multiple_of=8 if training_args.fp16 else None, # Pad for FP16 efficiency
         )
-
-    @dataclass
-    class DataCollatorForBartSeq2Seq:
-        """
-        Data collator for BART sequence-to-sequence pre-training (text infilling).
-        Reference: BART Paper (https://arxiv.org/abs/1910.13461)
-        Adapated from similar implementations found online.
-        """
-        tokenizer: BartTokenizerFast
-        masking_fraction: float # Fraction of tokens to mask
-        poisson_lambda: float # Lambda for span length sampling
-        pad_to_multiple_of: Optional[int] = None
-        ignore_pad_token_for_loss: bool = True
-
-        def __call__(self, examples):
-            import torch
-            import numpy as np
-            import random
-            
-            # If batch is a list of dicts with 'text', process them
-            if isinstance(examples[0], dict) and "text" in examples[0]:
-                batch = self.tokenizer( # Tokenize the inputs
-                    [ex["text"] for ex in examples], 
-                    return_tensors="pt", 
-                    padding="longest", 
-                    truncation=True, 
-                    max_length=self.tokenizer.model_max_length
-                )
-            else:
-                # Assume this is already a batch from the tokenized dataset
-                batch = {
-                    k: torch.stack([torch.tensor(ex[k]) for ex in examples])
-                    if examples[0][k] is not None and isinstance(examples[0][k], list)
-                    else torch.tensor([ex[k] for ex in examples])
-                    for k in examples[0].keys()
-                }
-            
-            input_ids = batch["input_ids"]
-            batch["labels"] = input_ids.clone() # Labels are the original uncorrupted sequence
-
-            # Perform BART's text infilling corruption
-            masked_input_ids = input_ids.clone()
-            
-            # Get mask of special tokens to avoid masking them
-            special_tokens_mask = batch.get("special_tokens_mask", None)
-            if special_tokens_mask is None:
-                special_tokens_mask = [
-                    self.tokenizer.get_special_tokens_mask(ids, already_has_special_tokens=True)
-                    for ids in input_ids.tolist()
-                ]
-                special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
-            
-            # Create new attention masks and decoder input ids tensors
-            attention_mask = batch.get("attention_mask", 
-                               (input_ids != self.tokenizer.pad_token_id).long())
-            
-            # Create decoder input ids (BART uses shifted input for decoder)
-            decoder_input_ids = torch.zeros_like(input_ids)
-            
-            # For each sequence in the batch
-            for i in range(input_ids.size(0)):
-                # Exclude padding and special tokens from potential masking
-                seq_length = attention_mask[i].sum().item()
-                if seq_length <= 2:  # Skip very short sequences (just BOS/EOS)
-                    continue
-                    
-                non_special_indices = torch.nonzero(
-                    (~special_tokens_mask[i]) & 
-                    (input_ids[i] != self.tokenizer.pad_token_id),
-                    as_tuple=False
-                ).squeeze()
-                
-                if len(non_special_indices) == 0:
-                    continue
-
-                # BART paper masks ~30% of tokens
-                n_tokens_to_mask = int(np.ceil(len(non_special_indices) * self.masking_fraction))
-                if n_tokens_to_mask == 0:
-                    continue
-
-                # Track which tokens are masked/deleted
-                deleted_indices = set()
-                
-                # Keep selecting spans until we've masked enough tokens
-                while len(deleted_indices) < n_tokens_to_mask:
-                    # Sample span length from Poisson distribution (λ=3)
-                    span_length = np.random.poisson(self.poisson_lambda)
-                    span_length = max(1, span_length)  # Ensure at least length 1
-                    
-                    # If we have too few tokens left to mask, just use what's available
-                    if len(deleted_indices) + span_length > n_tokens_to_mask:
-                        span_length = n_tokens_to_mask - len(deleted_indices)
-                        
-                    # Find available positions (not already masked/deleted)
-                    available_indices = [idx.item() for idx in non_special_indices 
-                                       if idx.item() not in deleted_indices]
-                    if not available_indices:
-                        break
-                    
-                    # Select random start position for the span
-                    start_idx = random.choice(available_indices)
-                    
-                    # Determine end of span (ensuring we don't go beyond sequence or mask too many tokens)
-                    end_idx = min(start_idx + span_length, seq_length - 1)
-                    
-                    # Check if we're not trying to mask special tokens
-                    span_indices = list(range(start_idx, end_idx))
-                    span_indices = [idx for idx in span_indices 
-                                  if not special_tokens_mask[i, idx] and idx not in deleted_indices]
-                    
-                    if not span_indices:
-                        continue
-                    
-                    # Replace the first token with <mask>
-                    first_idx = span_indices[0]
-                    masked_input_ids[i, first_idx] = self.tokenizer.mask_token_id
-                    
-                    # Mark all tokens in span as deleted (except the first one we masked)
-                    for idx in span_indices[1:]:
-                        deleted_indices.add(idx)
-                
-                # Now we need to actually delete the tokens marked for deletion
-                # This is more complex as we need to shift tokens left
-                if deleted_indices:
-                    deleted_indices = sorted(list(deleted_indices))
-                    new_seq = []
-                    
-                    # Keep only non-deleted tokens
-                    for j in range(seq_length):
-                        if j not in deleted_indices:
-                            new_seq.append(masked_input_ids[i, j].item())
-                    
-                    # Pad to original length
-                    new_seq = new_seq + [self.tokenizer.pad_token_id] * len(deleted_indices)
-                    
-                    # Update the masked sequence
-                    masked_input_ids[i, :seq_length] = torch.tensor(new_seq[:seq_length])
-                
-                # Create proper decoder input for sequence-to-sequence task
-                # Shift the target right and prepend BOS token
-                decoder_input_ids[i, 0] = self.tokenizer.bos_token_id
-                decoder_input_ids[i, 1:seq_length] = batch["labels"][i, :seq_length-1]
-            
-            # Update with corrupted input ids and recalculate attention mask
-            batch["input_ids"] = masked_input_ids
-            batch["attention_mask"] = (masked_input_ids != self.tokenizer.pad_token_id).long()
-            batch["decoder_input_ids"] = decoder_input_ids
-            
-            # Ignore padding tokens in labels
-            if self.ignore_pad_token_for_loss:
-                batch["labels"][batch["labels"] == self.tokenizer.pad_token_id] = -100
-
-            return batch
 
     # Initialize our Trainer
     trainer = Trainer(
