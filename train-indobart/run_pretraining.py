@@ -2,10 +2,12 @@ import logging
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 import warnings
 import packaging.version
+import traceback
 
 # Disable wandb logging
 os.environ["WANDB_DISABLED"] = "true"
@@ -18,9 +20,9 @@ from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
-    AutoModelForMaskedLM, # Using MLM for simplicity, BART would use Seq2Seq
+    AutoModelForMaskedLM,  # Using MLM for simplicity, BART would use Seq2Seq
     AutoModelForSeq2SeqLM,
-    BartTokenizerFast, # Use the specific BART tokenizer
+    BartTokenizerFast,  # Use the specific BART tokenizer
     HfArgumentParser,
     Trainer,
     TrainingArguments,
@@ -129,7 +131,7 @@ class DataTrainingArguments:
         metadata={
             "help": (
                 "The maximum total input sequence length after tokenization. Sequences longer "
-                "than this will be truncated." # Note: grouping handles this slightly differently
+                "than this will be truncated."  # Note: grouping handles this slightly differently
             )
         },
     )
@@ -174,20 +176,20 @@ class DataTrainingArguments:
     )
     streaming: bool = field(default=False, metadata={"help": "Enable streaming mode"})
     use_cached_prep: bool = field(
-        default=False, 
-        metadata={"help": "Use cached preprocessed datasets if available"}
+        default=False,
+        metadata={"help": "Use cached preprocessed datasets if available"},
     )
     dataset_cache_dir: Optional[str] = field(
         default=None,
-        metadata={"help": "Directory to store cached datasets and preprocessed data"}
+        metadata={"help": "Directory to store cached datasets and preprocessed data"},
     )
     force_reload_raw: bool = field(
-        default=False, 
-        metadata={"help": "Force reload raw datasets even if cached version exists"}
+        default=False,
+        metadata={"help": "Force reload raw datasets even if cached version exists"},
     )
     save_preprocessed: bool = field(
-        default=True, 
-        metadata={"help": "Save preprocessed datasets to disk to speed up future runs"}
+        default=True,
+        metadata={"help": "Save preprocessed datasets to disk to speed up future runs"},
     )
 
     def __post_init__(self):
@@ -225,8 +227,8 @@ class DataCollatorForBartSeq2Seq:
     Adapated from similar implementations found online.
     """
     tokenizer: BartTokenizerFast
-    masking_fraction: float # Fraction of tokens to mask
-    poisson_lambda: float # Lambda for span length sampling
+    masking_fraction: float  # Fraction of tokens to mask
+    poisson_lambda: float  # Lambda for span length sampling
     pad_to_multiple_of: Optional[int] = None
     ignore_pad_token_for_loss: bool = True
 
@@ -234,14 +236,14 @@ class DataCollatorForBartSeq2Seq:
         import torch
         import numpy as np
         import random
-        
+
         # If batch is a list of dicts with 'text', process them
         if isinstance(examples[0], dict) and "text" in examples[0]:
-            batch = self.tokenizer( # Tokenize the inputs
-                [ex["text"] for ex in examples], 
-                return_tensors="pt", 
-                padding="longest", 
-                truncation=True, 
+            batch = self.tokenizer(  # Tokenize the inputs
+                [ex["text"] for ex in examples],
+                return_tensors="pt",
+                padding="longest",
+                truncation=True,
                 max_length=self.tokenizer.model_max_length
             )
         else:
@@ -252,13 +254,13 @@ class DataCollatorForBartSeq2Seq:
                 else torch.tensor([ex[k] for ex in examples])
                 for k in examples[0].keys()
             }
-        
+
         input_ids = batch["input_ids"]
-        batch["labels"] = input_ids.clone() # Labels are the original uncorrupted sequence
+        batch["labels"] = input_ids.clone()  # Labels are the original uncorrupted sequence
 
         # Perform BART's text infilling corruption
         masked_input_ids = input_ids.clone()
-        
+
         # Get mask of special tokens to avoid masking them
         special_tokens_mask = batch.get("special_tokens_mask", None)
         if special_tokens_mask is None:
@@ -267,27 +269,27 @@ class DataCollatorForBartSeq2Seq:
                 for ids in input_ids.tolist()
             ]
             special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
-        
+
         # Create new attention masks and decoder input ids tensors
-        attention_mask = batch.get("attention_mask", 
+        attention_mask = batch.get("attention_mask",
                            (input_ids != self.tokenizer.pad_token_id).long())
-        
+
         # Create decoder input ids (BART uses shifted input for decoder)
         decoder_input_ids = torch.zeros_like(input_ids)
-        
+
         # For each sequence in the batch
         for i in range(input_ids.size(0)):
             # Exclude padding and special tokens from potential masking
             seq_length = attention_mask[i].sum().item()
             if seq_length <= 2:  # Skip very short sequences (just BOS/EOS)
                 continue
-                
+
             non_special_indices = torch.nonzero(
-                (~special_tokens_mask[i]) & 
+                (~special_tokens_mask[i]) &
                 (input_ids[i] != self.tokenizer.pad_token_id),
                 as_tuple=False
             ).squeeze()
-            
+
             if len(non_special_indices) == 0:
                 continue
 
@@ -298,72 +300,72 @@ class DataCollatorForBartSeq2Seq:
 
             # Track which tokens are masked/deleted
             deleted_indices = set()
-            
+
             # Keep selecting spans until we've masked enough tokens
             while len(deleted_indices) < n_tokens_to_mask:
                 # Sample span length from Poisson distribution (λ=3)
                 span_length = np.random.poisson(self.poisson_lambda)
                 span_length = max(1, span_length)  # Ensure at least length 1
-                
+
                 # If we have too few tokens left to mask, just use what's available
                 if len(deleted_indices) + span_length > n_tokens_to_mask:
                     span_length = n_tokens_to_mask - len(deleted_indices)
-                    
+
                 # Find available positions (not already masked/deleted)
-                available_indices = [idx.item() for idx in non_special_indices 
+                available_indices = [idx.item() for idx in non_special_indices
                                    if idx.item() not in deleted_indices]
                 if not available_indices:
                     break
-                
+
                 # Select random start position for the span
                 start_idx = random.choice(available_indices)
-                
+
                 # Determine end of span (ensuring we don't go beyond sequence or mask too many tokens)
                 end_idx = min(start_idx + span_length, seq_length - 1)
-                
+
                 # Check if we're not trying to mask special tokens
                 span_indices = list(range(start_idx, end_idx))
-                span_indices = [idx for idx in span_indices 
+                span_indices = [idx for idx in span_indices
                               if not special_tokens_mask[i, idx] and idx not in deleted_indices]
-                
+
                 if not span_indices:
                     continue
-                
+
                 # Replace the first token with <mask>
                 first_idx = span_indices[0]
                 masked_input_ids[i, first_idx] = self.tokenizer.mask_token_id
-                
+
                 # Mark all tokens in span as deleted (except the first one we masked)
                 for idx in span_indices[1:]:
                     deleted_indices.add(idx)
-            
+
             # Now we need to actually delete the tokens marked for deletion
             # This is more complex as we need to shift tokens left
             if deleted_indices:
                 deleted_indices = sorted(list(deleted_indices))
                 new_seq = []
-                
+
                 # Keep only non-deleted tokens
                 for j in range(seq_length):
                     if j not in deleted_indices:
                         new_seq.append(masked_input_ids[i, j].item())
-                
+
                 # Pad to original length
                 new_seq = new_seq + [self.tokenizer.pad_token_id] * len(deleted_indices)
-                
+
                 # Update the masked sequence
                 masked_input_ids[i, :seq_length] = torch.tensor(new_seq[:seq_length])
-            
+
             # Create proper decoder input for sequence-to-sequence task
             # Shift the target right and prepend BOS token
             decoder_input_ids[i, 0] = self.tokenizer.bos_token_id
             decoder_input_ids[i, 1:seq_length] = batch["labels"][i, :seq_length-1]
-        
+
         # Update with corrupted input ids and recalculate attention mask
         batch["input_ids"] = masked_input_ids
         batch["attention_mask"] = (masked_input_ids != self.tokenizer.pad_token_id).long()
         batch["decoder_input_ids"] = decoder_input_ids
-        
+
         # Ignore padding tokens in labels
         if self.ignore_pad_token_for_loss:
             batch["labels"][batch["labels"] == self.tokenizer.pad_token_id] = -100
@@ -399,6 +401,44 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    # Load dataset cache_dir by using relative paths if needed
+    dataset_cache_dir = data_args.dataset_cache_dir
+    if dataset_cache_dir is not None and not os.path.isabs(dataset_cache_dir):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        dataset_cache_dir = os.path.normpath(os.path.join(script_dir, dataset_cache_dir))
+        logger.info(f"Using resolved absolute path for dataset cache: {dataset_cache_dir}")
+
+    # Add special for distributed environments
+    # For distributed environments, we need to make sure all processes access files consistently
+    if training_args.local_rank != -1:
+        logger.info(f"Running in distributed mode with local_rank: {training_args.local_rank}")
+        # Convert relative paths to absolute for all file arguments to ensure consistency
+        if data_args.train_file and not os.path.isabs(data_args.train_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            data_args.train_file = os.path.normpath(os.path.join(script_dir, data_args.train_file))
+            logger.info(f"Converted train_file to absolute path: {data_args.train_file}")
+            
+        if data_args.validation_file and not os.path.isabs(data_args.validation_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            data_args.validation_file = os.path.normpath(os.path.join(script_dir, data_args.validation_file))
+            logger.info(f"Converted validation_file to absolute path: {data_args.validation_file}")
+            
+        # In distributed setting, make sure files exist on all nodes
+        if data_args.train_file:
+            logger.info(f"Rank {training_args.local_rank} checking train file: {data_args.train_file}")
+            if not os.path.exists(data_args.train_file):
+                raise FileNotFoundError(f"Rank {training_args.local_rank} cannot find train_file at {data_args.train_file}")
+            else:
+                logger.info(f"Rank {training_args.local_rank} found train file with size: {os.path.getsize(data_args.train_file)} bytes")
+                
+        # Make sure all processes reach this point before continuing
+        # This acts as a barrier to ensure all processes have set up their paths
+        import torch.distributed as dist
+        if dist.is_initialized():
+            logger.info(f"Rank {training_args.local_rank} waiting at barrier")
+            dist.barrier()
+            logger.info(f"Rank {training_args.local_rank} passed barrier")
 
     if training_args.should_log:
         # The default of training_args.log_level is passive, so we set log level at info here to have that default.
@@ -454,10 +494,10 @@ def main():
             script_dir = os.path.dirname(os.path.abspath(__file__))
             dataset_cache_dir = os.path.normpath(os.path.join(script_dir, dataset_cache_dir))
             logger.info(f"Using resolved absolute path for dataset cache: {dataset_cache_dir}")
-            
+
         # Create cache directory if it doesn't exist
         os.makedirs(dataset_cache_dir, exist_ok=True)
-            
+
         cache_key = f"{model_args.model_name_or_path.replace('/', '_')}_{data_args.max_seq_length}"
         if data_args.train_file:
             cache_key += f"_{os.path.basename(data_args.train_file)}"
@@ -465,15 +505,15 @@ def main():
             cache_key += f"_{data_args.dataset_name}"
             if data_args.dataset_config_name:
                 cache_key += f"_{data_args.dataset_config_name}"
-                
+
         preprocessed_dataset_path = os.path.join(dataset_cache_dir, f"preprocessed_{cache_key}")
-        
+
         if os.path.exists(preprocessed_dataset_path) and not data_args.overwrite_cache:
             try:
                 logger.info(f"Loading preprocessed datasets from {preprocessed_dataset_path}")
                 raw_datasets = datasets.load_from_disk(preprocessed_dataset_path)
                 logger.info("Successfully loaded preprocessed datasets!")
-                
+
                 # Verify the datasets have the expected splits
                 if "train" not in raw_datasets or (training_args.do_eval and "validation" not in raw_datasets):
                     logger.warning("Cached dataset doesn't have required splits. Reprocessing dataset.")
@@ -486,12 +526,12 @@ def main():
             except Exception as e:
                 logger.warning(f"Failed to load preprocessed datasets: {e}")
                 preprocessed_dataset_path = None  # Force reprocess
-    
+
     # If we don't have valid cached preprocessed datasets, load raw data
     if not data_args.use_cached_prep or preprocessed_dataset_path is None or data_args.overwrite_cache:
         logger.info("Loading raw datasets...")
         start_time = time.time()
-        
+
         if data_args.dataset_name is not None:
             # Downloading and loading a dataset from the hub.
             raw_datasets = load_dataset(
@@ -503,7 +543,7 @@ def main():
                 download_mode="force_redownload" if data_args.force_reload_raw else None,
             )
             if "validation" not in raw_datasets.keys() and not data_args.streaming:
-                 # Create validation split if not present
+                # Create validation split if not present
                 raw_datasets["validation"] = load_dataset(
                     data_args.dataset_name,
                     data_args.dataset_config_name,
@@ -523,9 +563,9 @@ def main():
                     download_mode="force_redownload" if data_args.force_reload_raw else None,
                 )
             elif "validation" not in raw_datasets.keys() and data_args.streaming:
-                 logger.warning("Streaming mode detected without validation split. Validation will be skipped.")
-                 # Cannot easily split in streaming mode without loading everything
-                 raw_datasets["validation"] = None 
+                logger.warning("Streaming mode detected without validation split. Validation will be skipped.")
+                # Cannot easily split in streaming mode without loading everything
+                raw_datasets["validation"] = None
 
         else:
             data_files = {}
@@ -537,12 +577,14 @@ def main():
                     script_dir = os.path.dirname(os.path.abspath(__file__))
                     train_file = os.path.normpath(os.path.join(script_dir, train_file))
                     logger.info(f"Using resolved absolute path for train file: {train_file}")
-                
+
                 # Add debug information about file existence
                 if not os.path.exists(train_file):
                     logger.error(f"Train file not found at path: {train_file}")
                     logger.error(f"Current working directory: {os.getcwd()}")
                     logger.error(f"Original train file path: {data_args.train_file}")
+                    logger.error(f"Contents of directory: {os.listdir(os.path.dirname(train_file))}")
+                    logger.error(f"Rank: {training_args.local_rank}")
                     raise ValueError(f"Train file not found at path: {train_file}")
                 else:
                     logger.info(f"Train file found at: {train_file}")
@@ -556,7 +598,7 @@ def main():
                     script_dir = os.path.dirname(os.path.abspath(__file__))
                     validation_file = os.path.normpath(os.path.join(script_dir, validation_file))
                     logger.info(f"Using resolved absolute path for validation file: {validation_file}")
-                
+
                 # Add debug information about file existence
                 if not os.path.exists(validation_file):
                     logger.error(f"Validation file not found at path: {validation_file}")
@@ -569,10 +611,10 @@ def main():
             # Determine the extension from the train file if available, otherwise validation
             first_file = data_args.train_file or data_args.validation_file
             if not first_file:
-                 raise ValueError("Need at least a train_file or validation_file when dataset_name is not provided.")
+                raise ValueError("Need at least a train_file or validation_file when dataset_name is not provided.")
             extension = first_file.split(".")[-1]
             if extension == "txt":
-                extension = "text" # datasets library uses 'text' for .txt files
+                extension = "text"  # datasets library uses 'text' for .txt files
                 if hasattr(data_args, 'keep_linebreaks'):
                     dataset_args = {"keep_linebreaks": data_args.keep_linebreaks}
                 else:
@@ -580,27 +622,39 @@ def main():
             else:
                 dataset_args = {}
 
-            raw_datasets = load_dataset(
-                extension, # Pass the file type ('text', 'csv', 'json')
-                data_files=data_files,
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-                **dataset_args,
-            )
-            # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-            if "validation" not in raw_datasets.keys():
-                if data_args.validation_split_percentage is None or data_args.validation_split_percentage == 0:
-                    raise ValueError(
-                        f"Need either a validation file or a validation_split_percentage greater than 0."
-                    )
-                
-                raw_datasets = raw_datasets["train"].train_test_split(
-                    test_size=data_args.validation_split_percentage / 100
+            # Set appropriate cache directory
+            cache_dir = data_args.dataset_cache_dir or model_args.cache_dir
+
+            # Make sure the cache directory exists
+            if cache_dir and not os.path.exists(cache_dir):
+                os.makedirs(cache_dir, exist_ok=True)
+                logger.info(f"Created cache directory: {cache_dir}")
+
+            logger.info(f"Loading dataset from files: {data_files}")
+            logger.info(f"Using cache directory: {cache_dir}")
+            logger.info(f"Dataset arguments: {dataset_args}")
+
+            try:
+                raw_datasets = load_dataset(
+                    extension,  # Pass the file type ('text', 'csv', 'json')
+                    data_files=data_files,
+                    cache_dir=cache_dir,  # Use the dedicated dataset cache dir
+                    token=model_args.token,
+                    **dataset_args,
                 )
-                raw_datasets["train"] = raw_datasets["train"]
-                raw_datasets["validation"] = raw_datasets["test"]
-                del raw_datasets["test"]
-                
+                logger.info(f"Successfully loaded dataset: {raw_datasets}")
+                logger.info(f"Dataset keys: {raw_datasets.keys() if raw_datasets else 'None'}")
+
+                # Add additional safeguard
+                if raw_datasets is None or "train" not in raw_datasets:
+                    logger.error("Dataset loaded but train split is missing")
+                    raise ValueError("Dataset loaded but train split is missing")
+
+            except Exception as e:
+                logger.error(f"Error loading dataset: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                raise ValueError(f"Failed to load dataset: {str(e)}")
+
         logger.info(f"Raw datasets loaded in {time.time() - start_time:.2f} seconds")
 
     # Load pretrained model and tokenizer
@@ -630,17 +684,17 @@ def main():
         "trust_remote_code": model_args.trust_remote_code,
     }
     if model_args.tokenizer_name_or_path:
-         # Load the custom trained tokenizer (expects vocab.json and merges.txt in the dir)
+        # Load the custom trained tokenizer (expects vocab.json and merges.txt in the dir)
         tokenizer = BartTokenizerFast.from_pretrained(model_args.tokenizer_name_or_path, **tokenizer_kwargs)
         logger.info(f"Loaded custom tokenizer from {model_args.tokenizer_name_or_path}")
     elif model_args.model_name_or_path:
-         # This path would load the default tokenizer for the model, 
-         # which is usually not what we want when pre-training with a custom vocab
+        # This path would load the default tokenizer for the model, 
+        # which is usually not what we want when pre-training with a custom vocab
         # tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
         raise ValueError(
-             "You are instantiating a new tokenizer from scratch. This is not supported by this script." 
-             "Provide the path to your trained tokenizer with --tokenizer_name_or_path."
-         )
+            "You are instantiating a new tokenizer from scratch. This is not supported by this script."
+            "Provide the path to your trained tokenizer with --tokenizer_name_or_path."
+        )
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -679,21 +733,21 @@ def main():
             )
         column_names = list(raw_datasets["train"].features) if not data_args.streaming else list(raw_datasets["train"].take(1))[0].keys()
     else:
-         if data_args.validation_file is not None:
-             # Check if raw_datasets is defined
-             if 'raw_datasets' not in locals() or raw_datasets is None:
-                 raise ValueError(
-                     "No dataset is available for validation. Please provide a dataset_name or validation_file."
-                 )
-             column_names = list(raw_datasets["validation"].features) if not data_args.streaming else list(raw_datasets["validation"].take(1))[0].keys()
-         else:
-             # Handle case where only evaluation is done and train_file was used for split
-             # Check if raw_datasets is defined
-             if 'raw_datasets' not in locals() or raw_datasets is None:
-                 raise ValueError(
-                     "No dataset is available. Please provide a dataset_name, train_file, or validation_file."
-                 )
-             column_names = list(raw_datasets["train"].features) if not data_args.streaming else list(raw_datasets["train"].take(1))[0].keys()
+        if data_args.validation_file is not None:
+            # Check if raw_datasets is defined
+            if 'raw_datasets' not in locals() or raw_datasets is None:
+                raise ValueError(
+                    "No dataset is available for validation. Please provide a dataset_name or validation_file."
+                )
+            column_names = list(raw_datasets["validation"].features) if not data_args.streaming else list(raw_datasets["validation"].take(1))[0].keys()
+        else:
+            # Handle case where only evaluation is done and train_file was used for split
+            # Check if raw_datasets is defined
+            if 'raw_datasets' not in locals() or raw_datasets is None:
+                raise ValueError(
+                    "No dataset is available. Please provide a dataset_name, train_file, or validation_file."
+                )
+            column_names = list(raw_datasets["train"].features) if not data_args.streaming else list(raw_datasets["train"].take(1))[0].keys()
 
     text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -714,7 +768,7 @@ def main():
                 # We use this option because DataCollatorForLanguageModeling relies on it.
                 return_special_tokens_mask=True,
             )
-        
+
         with training_args.main_process_first(desc="dataset map tokenization"):
             tokenized_datasets = raw_datasets.map(
                 tokenize_function,
@@ -732,7 +786,7 @@ def main():
             return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
 
         with training_args.main_process_first(desc="dataset map tokenization"):
-             if not data_args.streaming:
+            if not data_args.streaming:
                 tokenized_datasets = raw_datasets.map(
                     tokenize_function,
                     batched=True,
@@ -741,12 +795,12 @@ def main():
                     load_from_cache_file=not data_args.overwrite_cache,
                     desc="Running tokenizer on dataset",
                 )
-             else:
-                 tokenized_datasets = raw_datasets.map(
-                     tokenize_function,
-                     batched=True,
-                     remove_columns=column_names,
-                 )
+            else:
+                tokenized_datasets = raw_datasets.map(
+                    tokenize_function,
+                    batched=True,
+                    remove_columns=column_names,
+                )
 
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of
         # max_seq_length.
@@ -766,12 +820,12 @@ def main():
                 for k, t in concatenated_examples.items()
             }
             return result
-        
+
         # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a
         # remainder for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value
         # might be slower to preprocess. To speed up this part, we use multiprocessing.
         with training_args.main_process_first(desc="grouping texts together"):
-             if not data_args.streaming:
+            if not data_args.streaming:
                 tokenized_datasets = tokenized_datasets.map(
                     group_texts,
                     batched=True,
@@ -779,31 +833,30 @@ def main():
                     load_from_cache_file=not data_args.overwrite_cache,
                     desc=f"Grouping texts in chunks of {block_size}",
                 )
-             else:
-                 tokenized_datasets = tokenized_datasets.map(
-                     group_texts, batched=True
-                 )
+            else:
+                tokenized_datasets = tokenized_datasets.map(
+                    group_texts, batched=True
+                )
 
     if training_args.do_train:
         if "train" not in tokenized_datasets:
             raise ValueError("--do_train requires a train dataset")
         train_dataset = tokenized_datasets["train"]
         if data_args.max_train_samples is not None:
-             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-             train_dataset = train_dataset.select(range(max_train_samples)) if not data_args.streaming else train_dataset.take(max_train_samples) 
-             
+            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+            train_dataset = train_dataset.select(range(max_train_samples)) if not data_args.streaming else train_dataset.take(max_train_samples)
 
     if training_args.do_eval:
-         # Use validation split created earlier or the provided validation file
+        # Use validation split created earlier or the provided validation file
         if "validation" not in tokenized_datasets or tokenized_datasets["validation"] is None:
-             logger.warning("Validation dataset not found or could not be created. Skipping evaluation.")
-             training_args.do_eval = False # Disable eval if no validation set
-             eval_dataset = None
+            logger.warning("Validation dataset not found or could not be created. Skipping evaluation.")
+            training_args.do_eval = False  # Disable eval if no validation set
+            eval_dataset = None
         else:
-             eval_dataset = tokenized_datasets["validation"]
-             if data_args.max_eval_samples is not None:
-                 max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-                 eval_dataset = eval_dataset.select(range(max_eval_samples)) if not data_args.streaming else eval_dataset.take(max_eval_samples)
+            eval_dataset = tokenized_datasets["validation"]
+            if data_args.max_eval_samples is not None:
+                max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+                eval_dataset = eval_dataset.select(range(max_eval_samples)) if not data_args.streaming else eval_dataset.take(max_eval_samples)
 
     # Data collator
     # We have already loaded the tokenizer, so we use it directly.
@@ -819,23 +872,23 @@ def main():
             tokenizer=tokenizer,
             masking_fraction=bart_args.masking_fraction,
             poisson_lambda=bart_args.poisson_lambda,
-            pad_to_multiple_of=8 if training_args.fp16 else None, # Pad for FP16 efficiency
+            pad_to_multiple_of=8 if training_args.fp16 else None,  # Pad for FP16 efficiency
         )
     else:
         logger.info("Using standard Masked Language Modeling (MLM) objective.")
         if tokenizer.mask_token is None:
-             warnings.warn(
+            warnings.warn(
                 "This tokenizer does not have a mask token which is required for MLM. Adding one temporarily."
                 " Consider adding it permanently during tokenizer training/loading."
-             )
-             # Potentially add a mask token here if really needed, but it's better if the tokenizer has it.
-             # tokenizer.add_special_tokens({'mask_token': '[MASK]'}) 
-             # model.resize_token_embeddings(len(tokenizer)) 
+            )
+            # Potentially add a mask token here if really needed, but it's better if the tokenizer has it.
+            # tokenizer.add_special_tokens({'mask_token': '[MASK]'}) 
+            # model.resize_token_embeddings(len(tokenizer)) 
 
         data_collator = DataCollatorForLanguageModeling(
             tokenizer=tokenizer,
             mlm_probability=data_args.mlm_probability,
-            pad_to_multiple_of=8 if training_args.fp16 else None, # Pad for FP16 efficiency
+            pad_to_multiple_of=8 if training_args.fp16 else None,  # Pad for FP16 efficiency
         )
 
     # Initialize our Trainer
@@ -903,14 +956,14 @@ def main():
     # Log a few random samples from the training set:
     if training_args.do_train:
         logger.info(f"Tokenization complete in {time.time() - tokenization_start_time:.2f} seconds")
-        
+
         # Save preprocessed datasets to disk if requested
         if data_args.save_preprocessed and data_args.dataset_cache_dir and not data_args.streaming:
             try:
                 os.makedirs(data_args.dataset_cache_dir, exist_ok=True)
                 logger.info(f"Saving preprocessed datasets to {preprocessed_dataset_path}")
                 tokenized_datasets.save_to_disk(preprocessed_dataset_path)
-                
+
                 # Save metadata about this preprocessing
                 with open(os.path.join(preprocessed_dataset_path, "preprocessing_info.json"), "w") as f:
                     json.dump({
@@ -924,7 +977,7 @@ def main():
                 logger.info("Preprocessing data cached successfully")
             except Exception as e:
                 logger.warning(f"Failed to save preprocessed datasets: {e}")
-        
+
         for index in random.sample(range(len(tokenized_datasets["train"])), min(3, len(tokenized_datasets["train"]))):
             logger.info(f"Sample {index} of the training set:")
             for key in tokenized_datasets["train"][index]:
