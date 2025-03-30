@@ -450,7 +450,9 @@ def main():
         # Convert to absolute path if needed
         dataset_cache_dir = data_args.dataset_cache_dir
         if not os.path.isabs(dataset_cache_dir):
-            dataset_cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), dataset_cache_dir)
+            # Handle relative paths properly by resolving any ./ or ../
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            dataset_cache_dir = os.path.normpath(os.path.join(script_dir, dataset_cache_dir))
             logger.info(f"Using resolved absolute path for dataset cache: {dataset_cache_dir}")
             
         # Create cache directory if it doesn't exist
@@ -531,7 +533,9 @@ def main():
                 # Convert to absolute path if needed
                 train_file = data_args.train_file
                 if not os.path.isabs(train_file):
-                    train_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), train_file)
+                    # Handle relative paths properly by resolving any ./ or ../
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    train_file = os.path.normpath(os.path.join(script_dir, train_file))
                     logger.info(f"Using resolved absolute path for train file: {train_file}")
                 
                 # Add debug information about file existence
@@ -548,7 +552,9 @@ def main():
                 # Convert to absolute path if needed
                 validation_file = data_args.validation_file
                 if not os.path.isabs(validation_file):
-                    validation_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), validation_file)
+                    # Handle relative paths properly by resolving any ./ or ../
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    validation_file = os.path.normpath(os.path.join(script_dir, validation_file))
                     logger.info(f"Using resolved absolute path for validation file: {validation_file}")
                 
                 # Add debug information about file existence
