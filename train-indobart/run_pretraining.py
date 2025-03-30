@@ -519,8 +519,22 @@ def main():
         else:
             data_files = {}
             if data_args.train_file is not None:
+                # Add debug information about file existence
+                if not os.path.exists(data_args.train_file):
+                    logger.error(f"Train file not found at path: {data_args.train_file}")
+                    logger.error(f"Current working directory: {os.getcwd()}")
+                    logger.error(f"Absolute path attempted: {os.path.abspath(data_args.train_file)}")
+                    raise ValueError(f"Train file not found at path: {data_args.train_file}")
+                else:
+                    logger.info(f"Train file found at: {data_args.train_file}")
+                    logger.info(f"File size: {os.path.getsize(data_args.train_file)} bytes")
                 data_files["train"] = data_args.train_file
             if data_args.validation_file is not None:
+                # Add debug information about file existence
+                if not os.path.exists(data_args.validation_file):
+                    logger.error(f"Validation file not found at path: {data_args.validation_file}")
+                else:
+                    logger.info(f"Validation file found at: {data_args.validation_file}")
                 data_files["validation"] = data_args.validation_file
             if hasattr(data_args, 'test_file') and data_args.test_file is not None:
                 data_files["test"] = data_args.test_file
