@@ -147,12 +147,9 @@ else
     echo "Running in single device mode"
 fi
 
-# Add cache arguments for pretraining
+# For first run, disable cached preprocessing to ensure dataset loads properly
+echo "Disabling cached preprocessing for first run to ensure dataset loads properly"
 PRETRAINING_CACHE_ARGS=""
-if [ "$REUSE_CACHE" = true ]; then
-    PRETRAINING_CACHE_ARGS="$PRETRAINING_CACHE_ARGS --use_cached_prep --dataset_cache_dir $CACHE_DIR"
-    echo "Using cached preprocessed datasets if available"
-fi
 
 if [ "$FORCE_RELOAD" = true ]; then
     PRETRAINING_CACHE_ARGS="$PRETRAINING_CACHE_ARGS --force_reload_raw"
@@ -165,13 +162,27 @@ if [ ! -f "$PREPARED_DATA_FILE" ]; then
     exit 1
 else
     echo "Confirmed train file exists at $PREPARED_DATA_FILE ($(du -h "$PREPARED_DATA_FILE" | cut -f1))"
+    # Also check file is readable
+    if [ ! -r "$PREPARED_DATA_FILE" ]; then
+        echo "ERROR: Train file exists but is not readable: $PREPARED_DATA_FILE"
+        ls -la "$PREPARED_DATA_FILE"
+        exit 1
+    fi
+    echo "Train file is readable"
+    # Display the first few lines of the file to confirm content
+    echo "First 3 lines of train file:"
+    head -n 3 "$PREPARED_DATA_FILE"
 fi
+
+# Convert to absolute path for safety
+ABSOLUTE_TRAIN_FILE=$(realpath "$PREPARED_DATA_FILE")
+echo "Using absolute path for train file: $ABSOLUTE_TRAIN_FILE"
 
 # Start pretraining
 $LAUNCH_CMD run_pretraining.py \
     --model_name_or_path "$BASE_MODEL" \
     --tokenizer_name_or_path "$TOKENIZER_DIR" \
-    --train_file "$PREPARED_DATA_FILE" \
+    --train_file "$ABSOLUTE_TRAIN_FILE" \
     --output_dir "$OUTPUT_DIR" \
     --overwrite_output_dir \
     --do_train \

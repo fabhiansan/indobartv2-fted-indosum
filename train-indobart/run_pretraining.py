@@ -528,6 +528,9 @@ def main():
     # Initialize raw_datasets to None to ensure it's always defined
     raw_datasets = None
     
+    # Track whether cached dataset loading was attempted
+    cache_attempted = False
+    
     if data_args.use_cached_prep and data_args.dataset_cache_dir:
         # Convert to absolute path if needed
         dataset_cache_dir = data_args.dataset_cache_dir
@@ -559,19 +562,26 @@ def main():
                 # Verify the datasets have the expected splits
                 if "train" not in raw_datasets or (training_args.do_eval and "validation" not in raw_datasets):
                     logger.warning("Cached dataset doesn't have required splits. Reprocessing dataset.")
-                    preprocessed_dataset_path = None  # Force reprocess
+                    raw_datasets = None  # Force reprocess
                 else:
                     # Log dataset stats
                     logger.info(f"Train dataset size: {len(raw_datasets['train'])}")
                     if "validation" in raw_datasets:
                         logger.info(f"Validation dataset size: {len(raw_datasets['validation'])}")
+                cache_attempted = True
             except Exception as e:
                 logger.warning(f"Failed to load preprocessed datasets: {e}")
-                preprocessed_dataset_path = None  # Force reprocess
+                raw_datasets = None  # Force reprocess
+                cache_attempted = True
 
     # If we don't have valid cached preprocessed datasets, load raw data
-    if not data_args.use_cached_prep or preprocessed_dataset_path is None or data_args.overwrite_cache:
-        logger.info("Loading raw datasets...")
+    if raw_datasets is None:
+        # If we previously attempted to load from cache but failed, log that we're falling back
+        if cache_attempted:
+            logger.info("Falling back to loading raw datasets...")
+        else:
+            logger.info("Loading raw datasets...")
+            
         start_time = time.time()
 
         if data_args.dataset_name is not None:
@@ -624,11 +634,23 @@ def main():
                 if not os.path.exists(train_file):
                     logger.error(f"Train file not found at path: {train_file}")
                     logger.error(f"Current working directory: {os.getcwd()}")
-                    logger.error(f"Original train file path: {data_args.train_file}")
-                    logger.error(f"Contents of directory: {os.listdir(os.path.dirname(train_file))}")
+                    parent_dir = os.path.dirname(train_file)
+                    if os.path.exists(parent_dir):
+                        logger.error(f"Contents of directory: {os.listdir(parent_dir)}")
+                    else:
+                        logger.error(f"Parent directory {parent_dir} does not exist")
                     logger.error(f"Rank: {training_args.local_rank}")
-                    raise ValueError(f"Train file not found at path: {train_file}")
+                    raise FileNotFoundError(f"Train file not found at path: {train_file}")
                 else:
+                    # Check if the file is readable
+                    try:
+                        with open(train_file, 'r', encoding='utf-8') as f:
+                            sample_content = f.read(1000)  # Read first 1000 bytes
+                            logger.info(f"File is readable. Sample content: {sample_content[:50]}...")
+                    except Exception as e:
+                        logger.error(f"File exists but cannot be read: {e}")
+                        raise IOError(f"Train file exists but cannot be read: {e}")
+                        
                     logger.info(f"Train file found at: {train_file}")
                     logger.info(f"File size: {os.path.getsize(train_file)} bytes")
                 data_files["train"] = train_file
@@ -645,6 +667,15 @@ def main():
                 if not os.path.exists(validation_file):
                     logger.error(f"Validation file not found at path: {validation_file}")
                 else:
+                    # Check if the file is readable
+                    try:
+                        with open(validation_file, 'r', encoding='utf-8') as f:
+                            sample_content = f.read(1000)  # Read first 1000 bytes
+                            logger.info(f"File is readable. Sample content: {sample_content[:50]}...")
+                    except Exception as e:
+                        logger.error(f"File exists but cannot be read: {e}")
+                        raise IOError(f"Validation file exists but cannot be read: {e}")
+                    
                     logger.info(f"Validation file found at: {validation_file}")
                 data_files["validation"] = validation_file
             if hasattr(data_args, 'test_file') and data_args.test_file is not None:
@@ -679,12 +710,37 @@ def main():
             try:
                 logger.info(f"About to load dataset with: extension={extension}, data_files={data_files}, cache_dir={cache_dir}")
                 
-                # Add extra debugging - check if file is accessible and readable
+                # Add extra debugging - check if files are accessible and have content
                 for split_name, file_path in data_files.items():
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        first_line = f.readline().strip()
-                        logger.info(f"Successfully read first line from {split_name} file: '{first_line[:50]}...'")
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        logger.info(f"File '{split_name}' exists with size: {file_size} bytes")
+                        
+                        # Make sure the file is not empty
+                        if file_size == 0:
+                            logger.error(f"File '{split_name}' is empty (0 bytes)")
+                            raise ValueError(f"File '{split_name}' is empty")
+                            
+                        # Check if we can read the file
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            first_line = f.readline().strip()
+                            if not first_line:
+                                logger.error(f"File '{split_name}' first line is empty")
+                                # Try to read more
+                                content = f.read(1000)
+                                if not content:
+                                    logger.error(f"File '{split_name}' appears to be empty despite having size {file_size}")
+                                    raise ValueError(f"File '{split_name}' content is empty")
+                                else:
+                                    logger.info(f"File '{split_name}' has content but first line is empty. Sample: {content[:50]}...")
+                            else:
+                                logger.info(f"Successfully read first line from {split_name} file: '{first_line[:50]}...'")
+                    except Exception as e:
+                        logger.error(f"Error checking file '{split_name}': {e}")
+                        raise
                 
+                # Directly try loading with absolute paths and less caching
+                logger.info("Attempting to load with datasets.load_dataset...")
                 raw_datasets = load_dataset(
                     extension,  # Pass the file type ('text', 'csv', 'json')
                     data_files=data_files,
@@ -703,8 +759,26 @@ def main():
             except Exception as e:
                 logger.error(f"Error loading dataset: {str(e)}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
-                raise ValueError(f"Failed to load dataset: {str(e)}")
-
+                
+                # Try one more time with a direct file loading approach as fallback
+                try:
+                    logger.info("Attempting direct text file loading as fallback...")
+                    if "train" in data_files:
+                        train_texts = []
+                        with open(data_files["train"], 'r', encoding='utf-8') as f:
+                            train_texts = [line.strip() for line in f if line.strip()]
+                        
+                        if train_texts:
+                            logger.info(f"Successfully loaded {len(train_texts)} lines directly from file")
+                            raw_datasets = datasets.Dataset.from_dict({"text": train_texts})
+                            raw_datasets = datasets.DatasetDict({"train": raw_datasets})
+                            logger.info("Created dataset from direct file reading")
+                        else:
+                            logger.error("No text lines found in file")
+                            raise ValueError("No text lines found in file")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback loading also failed: {fallback_error}")
+                    raise ValueError(f"Failed to load dataset through multiple methods. Original error: {str(e)}")
         logger.info(f"Raw datasets loaded in {time.time() - start_time:.2f} seconds")
 
     # Verify raw_datasets was actually loaded
