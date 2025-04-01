@@ -38,7 +38,7 @@ OUTPUT_DIR="./indobart-pretrained"
 
 # Training parameters (Adjust based on your hardware)
 NUM_EPOCHS=3
-PER_DEVICE_BATCH_SIZE=8  # Turunkan dari 32 ke 8
+PER_DEVICE_BATCH_SIZE=8
 GRADIENT_ACCUMULATION_STEPS=4 # Effective batch size = N_GPUS * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
 LEARNING_RATE=5e-5
 WARMUP_STEPS=1000
@@ -200,6 +200,13 @@ $LAUNCH_CMD run_pretraining.py \
     --logging_steps "$LOGGING_STEPS" \
     --fp16 "$FP16" \
     --load_best_model_at_end \
+    --bart_objective true \
+    --masking_fraction 0.3 \
+    --poisson_lambda 3.0 \
+    $PRETRAINING_CACHE_ARGS
+
+echo -e "\nPre-training complete! Model saved to $OUTPUT_DIR"
+echo "You can now use this model for fine-tuning on downstream tasks."
     --bart_objective true \
     --masking_fraction 0.3 \
     --poisson_lambda 3.0 \
