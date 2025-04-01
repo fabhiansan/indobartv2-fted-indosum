@@ -38,7 +38,7 @@ OUTPUT_DIR="./indobart-pretrained"
 
 # Training parameters (Adjust based on your hardware)
 NUM_EPOCHS=3
-PER_DEVICE_BATCH_SIZE=8
+PER_DEVICE_BATCH_SIZE=8  # Turunkan dari 32 ke 8
 GRADIENT_ACCUMULATION_STEPS=4 # Effective batch size = N_GPUS * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
 LEARNING_RATE=5e-5
 WARMUP_STEPS=1000
