@@ -183,6 +183,12 @@ class DataTrainingArguments:
 
 # --- Main Script ---
 def main():
+    # --- Debugging: Print raw command line arguments ---
+    print("--- Raw sys.argv ---")
+    print(sys.argv)
+    print("--------------------")
+    # --- End Debugging ---
+
     print("--- Starting Summarization Fine-tuning ---")
 
     # Use HfArgumentParser to parse all arguments

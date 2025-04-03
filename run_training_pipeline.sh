@@ -108,7 +108,33 @@ COMMAND="python run_summarization.py \
   --load_best_model_at_end True \
   --metric_for_best_model rouge2" # Example: optimize for ROUGE-2 F1
   # Add other Seq2SeqTrainingArguments as needed
-run_step "$STEP_NAME" "$COMMAND"
+
+# Temporarily bypassing run_step for debugging the summarization command
+# run_step "$STEP_NAME" "$COMMAND"
+echo "--------------------------------------------------"
+echo "Running Step: $STEP_NAME (Direct Execution)"
+echo "Command: $COMMAND"
+echo "--------------------------------------------------"
+
+# --- Debugging: Check FINETUNED_OUTPUT_DIR before execution ---
+echo "DEBUG: FINETUNED_OUTPUT_DIR = '$FINETUNED_OUTPUT_DIR'"
+if [ -z "$FINETUNED_OUTPUT_DIR" ]; then
+  echo "Error: FINETUNED_OUTPUT_DIR is not set. Exiting."
+  exit 1
+fi
+# --- End Debugging ---
+
+# Execute on a single line to rule out line continuation issues
+python run_summarization.py --model_name_or_path "$PRETRAINED_OUTPUT_DIR" --dataset_name "$SUMMARIZATION_DATASET_NAME" --do_train --do_eval --do_predict --output_dir "$FINETUNED_OUTPUT_DIR" --num_train_epochs $FINETUNING_EPOCHS --per_device_train_batch_size $FINETUNING_BATCH_SIZE --per_device_eval_batch_size $FINETUNING_BATCH_SIZE --learning_rate $FINETUNING_LR --max_source_length 1024 --max_target_length 128 --predict_with_generate True --evaluation_strategy epoch --save_strategy epoch --logging_strategy steps --logging_steps 100 --fp16 True --load_best_model_at_end True --metric_for_best_model rouge2
+
+if [ $? -ne 0 ]; then
+  echo "Error: Step '$STEP_NAME' failed (single-line execution). Exiting."
+  exit 1
+fi
+echo "--------------------------------------------------"
+echo "Step '$STEP_NAME' completed successfully."
+echo "--------------------------------------------------"
+
 
 echo "--------------------------------------------------"
 echo "Training Pipeline Completed Successfully!"
