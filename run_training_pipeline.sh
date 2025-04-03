@@ -22,13 +22,13 @@ export TOKENIZER_VOCAB_SIZE=32000
 export BASE_MODEL="facebook/bart-base"
 export PRETRAINED_OUTPUT_DIR="./indobart_pretrained"
 export PRETRAINING_EPOCHS=1 # Adjust as needed (can be float)
-export PRETRAINING_BATCH_SIZE=8 # Adjust based on GPU memory
+export PRETRAINING_BATCH_SIZE=24 # Adjust based on GPU memory
 export PRETRAINING_LR=5e-5
 
 # Fine-tuning
 export FINETUNED_OUTPUT_DIR="./indobart_summarizer"
 export FINETUNING_EPOCHS=3 # Adjust as needed
-export FINETUNING_BATCH_SIZE=4 # Adjust based on GPU memory
+export FINETUNING_BATCH_SIZE=24 # Adjust based on GPU memory
 export FINETUNING_LR=3e-5
 
 # --- Helper Function ---

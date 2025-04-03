@@ -47,7 +47,7 @@ parser.add_argument("--mlm_probability", type=float, default=0.15, help="Ratio o
 
 # Training Args (Simplified - use TrainingArguments for full control)
 parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
-parser.add_argument("--per_device_train_batch_size", type=int, default=8, help="Batch size per GPU/TPU core/CPU for training.")
+parser.add_argument("--per_device_train_batch_size", type=int, default=24, help="Batch size per GPU/TPU core/CPU for training.")
 parser.add_argument("--learning_rate", type=float, default=5e-5, help="Initial learning rate.")
 parser.add_argument("--num_train_epochs", type=float, default=1.0, help="Total number of training epochs to perform.")
 # Add more TrainingArguments as needed (e.g., weight_decay, logging_steps, save_steps, gradient_accumulation_steps)

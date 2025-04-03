@@ -1,4 +1,5 @@
 import argparse
+import logging # Import logging
 import os
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
@@ -59,6 +60,15 @@ def get_training_corpus(dataset_stream):
             break
 
 if __name__ == "__main__":
+    # --- Setup Logging ---
+    # Define logger inside the main execution block
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+
     print("--- Starting Tokenizer Training ---")
     print(f"Dataset: {args.dataset_name}, Language: {args.dataset_lang}")
     print(f"Vocab Size: {args.vocab_size}, Min Frequency: {args.min_frequency}")
