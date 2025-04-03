@@ -77,7 +77,9 @@ COMMAND="python run_pretraining.py \
   --mean_span_length 3 \ # Corresponds to lambda=3 in BART paper (default in script)
   --fp16 True \
   --save_steps 10000 \
-  --logging_steps 500"
+  --logging_steps 500 \
+  --save_strategy epoch \
+  --save_total_limit 2"
   # Add other TrainingArguments as needed
 run_step "$STEP_NAME" "$COMMAND"
 
