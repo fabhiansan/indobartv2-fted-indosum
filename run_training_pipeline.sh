@@ -73,6 +73,8 @@ COMMAND="python run_pretraining.py \
   --per_device_train_batch_size $PRETRAINING_BATCH_SIZE \
   --learning_rate $PRETRAINING_LR \
   --max_seq_length 512 \
+  # --mlm_probability is not used with the custom BART collator
+  --mean_span_length 3 \ # Corresponds to lambda=3 in BART paper (default in script)
   --fp16 True \
   --save_steps 10000 \
   --logging_steps 500"
