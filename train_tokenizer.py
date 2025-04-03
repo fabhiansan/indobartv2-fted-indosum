@@ -1,5 +1,6 @@
 import argparse
 import logging # Import logging
+import json
 import os
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
@@ -122,6 +123,27 @@ if __name__ == "__main__":
 
     tokenizer.save_model(args.output_dir)
     print(f"Tokenizer files saved to {args.output_dir}")
+
+    # 5. Save tokenizer_config.json for transformers compatibility
+    print("\nCreating tokenizer_config.json...")
+    tokenizer_config = {
+        "tokenizer_class": "BartTokenizerFast", # Specify the class transformers should use
+        "bos_token": "<s>",
+        "eos_token": "</s>",
+        "pad_token": "<pad>",
+        "unk_token": "<unk>",
+        "mask_token": "<mask>",
+        # Add other relevant config if needed, e.g., clean_up_tokenization_spaces
+        "clean_up_tokenization_spaces": True # Common default, adjust if needed
+    }
+    config_path = os.path.join(args.output_dir, "tokenizer_config.json")
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(tokenizer_config, f, ensure_ascii=False, indent=2)
+        print(f"Saved tokenizer config to {config_path}")
+    except Exception as e:
+        print(f"Error saving tokenizer_config.json: {e}")
+
     print("Files created: vocab.json, merges.txt")
 
     print("\n--- Tokenizer Training Finished ---")
