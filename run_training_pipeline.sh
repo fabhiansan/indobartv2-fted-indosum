@@ -49,15 +49,15 @@ run_step() {
 
 # --- Pipeline Steps ---
 
-# 1. Train Tokenizer
-STEP_NAME="Train Tokenizer"
-COMMAND="python train_tokenizer.py \
-  --dataset_name \"$OSCAR_DATASET_NAME\" \
-  --dataset_lang \"$OSCAR_DATASET_LANG\" \
-  --vocab_size $TOKENIZER_VOCAB_SIZE \
-  --output_dir \"$TOKENIZER_OUTPUT_DIR\" \
-  --use_auth_token True" # Set to False if OSCAR version doesn't require login
-run_step "$STEP_NAME" "$COMMAND"
+# 1. Train Tokenizer (Done)
+# STEP_NAME="Train Tokenizer"
+# COMMAND="python train_tokenizer.py \
+#   --dataset_name \"$OSCAR_DATASET_NAME\" \
+#   --dataset_lang \"$OSCAR_DATASET_LANG\" \
+#   --vocab_size $TOKENIZER_VOCAB_SIZE \
+#   --output_dir \"$TOKENIZER_OUTPUT_DIR\" \
+#   --use_auth_token True" # Set to False if OSCAR version doesn't require login
+# run_step "$STEP_NAME" "$COMMAND"
 
 # 2. Continue Pre-training
 STEP_NAME="Continue Pre-training"
