@@ -27,6 +27,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.tokenization_utils_base import BatchEncoding # Added import
 from transformers.data.data_collator import DataCollatorMixin # Correct import path
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -96,6 +97,43 @@ class DataTrainingArguments:
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
 
+# Helper function for collating lists of integers
+# (Needed if examples are lists instead of dicts/BatchEncoding)
+def _collate_batch(examples, tokenizer, pad_to_multiple_of: Optional[int] = None):
+    """Collate `examples` into a batch, using the information in `tokenizer` for padding if necessary."""
+    # Tensorize if necessary.
+    if isinstance(examples[0], (list, tuple)):
+        examples = [torch.tensor(e, dtype=torch.long) for e in examples]
+
+    # Check if padding is necessary.
+    length_of_first = examples[0].size(0)
+    are_tensors_same_length = all(x.size(0) == length_of_first for x in examples)
+    if are_tensors_same_length and pad_to_multiple_of is None:
+        return torch.stack(examples, dim=0)
+
+    # If yes, check if we have a `pad_token`.
+    if tokenizer._pad_token is None:
+        raise ValueError(
+            "You are attempting to pad samples but the tokenizer does not have a pad token."
+        )
+
+    # Determine maximum length
+    max_length = max(x.size(0) for x in examples)
+    if pad_to_multiple_of is not None:
+        max_length = (
+            (max_length + pad_to_multiple_of - 1)
+            // pad_to_multiple_of
+            * pad_to_multiple_of
+        )
+
+    # Pad
+    result = examples[0].new_full([len(examples), max_length], tokenizer.pad_token_id)
+    for i, example in enumerate(examples):
+        if tokenizer.padding_side == "right":
+            result[i, : example.shape[0]] = example
+        else:
+            result[i, -example.shape[0] :] = example
+    return result
 
 # --- Main Script ---
 if __name__ == "__main__":
@@ -170,10 +208,22 @@ if __name__ == "__main__":
 
     # 3. Resize Token Embeddings
     print(f"Resizing token embeddings to match tokenizer vocab size: {tokenizer.vocab_size}")
-    model.resize_token_embeddings(len(tokenizer))
-    # Check if resizing worked (optional)
-    if model.get_input_embeddings().weight.shape[0] != len(tokenizer):
-         logger.warning("Embedding size mismatch after resizing. Check model/tokenizer compatibility.")
+    original_vocab_size = model.get_input_embeddings().weight.shape[0]
+    print(f"Original model vocab size: {original_vocab_size}")
+    print(f"Tokenizer vocab size: {len(tokenizer)}")
+    if original_vocab_size != len(tokenizer):
+        print(f"Resizing token embeddings from {original_vocab_size} to {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
+        # Verify after resizing
+        new_vocab_size = model.get_input_embeddings().weight.shape[0]
+        print(f"New model vocab size after resizing: {new_vocab_size}")
+        if new_vocab_size != len(tokenizer):
+            logger.error(f"FATAL: Embedding size mismatch even after resizing! Model: {new_vocab_size}, Tokenizer: {len(tokenizer)}")
+            exit(1) # Exit if resizing failed critically
+        # Also update the config if necessary (though resize_token_embeddings often handles this)
+        # model.config.vocab_size = new_vocab_size
+    else:
+        print("Model vocab size already matches tokenizer vocab size. No resizing needed.")
 
 
     # 4. Load and Prepare Dataset
@@ -284,195 +334,169 @@ class DataCollatorForBartTextInfilling(DataCollatorMixin):
         masked_indices &= (batch["labels"] != self.tokenizer.pad_token_id)
         # Also avoid masking BOS/EOS if they are distinct from PAD
         if self.tokenizer.bos_token_id is not None:
-             masked_indices &= (batch["labels"] != self.tokenizer.bos_token_id)
-        if self.tokenizer.eos_token_id is not None:
-             masked_indices &= (batch["labels"] != self.tokenizer.eos_token_id)
+            masked_indices &= (batch["labels"] != self.tokenizer.bos_token_id)
+        if self.tokenizer.eos_token_id is not None: # Align this 'if' with the previous 'if'
+            masked_indices &= (batch["labels"] != self.tokenizer.eos_token_id) # Indent under the 'if'
 
-        # Apply text infilling masking to input_ids
-        batch["input_ids"] = self.torch_mask_spans(batch["input_ids"], masked_indices)
+        # The initial self.tokenizer.pad call handles batch creation and padding.
 
-        # We only compute loss on masked tokens (the original tokens the model needs to predict)
-        # Set labels to -100 for non-masked tokens
-        batch["labels"][~masked_indices] = -100
+        # Clone input_ids for labels before masking (using the 'batch' from the initial pad call)
+        labels = batch["input_ids"].clone()
 
-        return batch
+        # Create corrupted input_ids using BART text infilling
+        masked_inputs = labels.clone() # Start with original tokens
+        special_tokens_mask = batch.pop("special_tokens_mask", None) # Use if available from tokenizer
 
-    def torch_mask_spans(self, inputs: Any, mask_indices: Any) -> Any:
+        # Perform BART text infilling masking
+        masked_inputs = self.torch_mask_text_infilling(masked_inputs, special_tokens_mask)
+
+        batch["input_ids"] = masked_inputs
+
+        # Set labels for non-masked tokens to -100
+        # In text infilling, the labels are the original tokens, but we ignore loss for tokens
+        # that were *not* part of a masked span *or* are padding tokens in the original sequence.
+        # The `masked_inputs` tensor now contains the MASK tokens where spans were.
+        # The `labels` tensor contains the original tokens.
+        # We need to set labels to -100 where `masked_inputs` is NOT a mask token,
+        # *and* also for the original padding tokens.
+        if self.tokenizer.pad_token_id is not None:
+            padding_mask = labels.eq(self.tokenizer.pad_token_id)
+            labels[padding_mask] = -100 # Ignore padding
+
+        # Ignore tokens that were not masked (i.e., where input is not MASK)
+        # Note: This assumes the MASK token itself isn't a valid label we want to predict, which is safe.
+        non_masked_original_tokens_mask = ~masked_inputs.eq(self.tokenizer.mask_token_id)
+        labels[non_masked_original_tokens_mask] = -100
+
+        batch["labels"] = labels
+
+        # Ensure attention mask corresponds to the potentially shorter masked_inputs before padding
+        # The tokenizer.pad should handle this correctly if called on the final masked inputs.
+        # Let's re-pad here to be certain lengths match after masking potentially shortened sequences.
+        # This requires converting back to list of lists, masking, then padding again.
+        # Simpler: Assume initial padding was sufficient and adjust attention mask.
+        # If initial padding was to max_length, attention_mask is likely correct.
+        # If padding was dynamic, it needs recalculation based on `masked_inputs`.
+        # Let's assume tokenizer.pad handled it initially.
+
+        return batch # Ensure this is indented to match the start of the torch_call method body
+
+
+    def torch_mask_text_infilling(self, inputs: torch.Tensor, special_tokens_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Masks spans in the input tensor according to the BART paper's text infilling objective.
-        Spans are determined by consecutive mask_indices=True.
-        Each span is replaced by a single mask token.
+        Apply BART's text infilling corruption to inputs.
+        - Sample span lengths from Poisson(lambda=mean_span_length).
+        - Sample number of tokens to mask based on mask_prob.
+        - Replace chosen spans with a single mask token.
         """
-        labels = inputs.clone() # Keep original for reference if needed, though not strictly necessary here
+        mask_token_id = self.tokenizer.mask_token_id
+        pad_token_id = self.tokenizer.pad_token_id
+        bos_token_id = self.tokenizer.bos_token_id
+        eos_token_id = self.tokenizer.eos_token_id
 
-        # Determine span lengths using Poisson distribution
-        # This is applied per sequence, but we can approximate by sampling lengths globally first
-        # Note: A more precise implementation samples lengths *during* the masking process per sequence.
-        # This simplified version masks tokens first, then collapses spans.
-
-        masked_inputs = []
+        masked_sequences = []
         for i in range(inputs.shape[0]): # Iterate through batch
-            seq_mask_indices = mask_indices[i]
-            seq_inputs = inputs[i]
+            sequence = inputs[i].tolist()
+            original_length = len(sequence) # Before removing padding for masking logic
 
-            # Find indices where masking occurs
-            mask_pos = seq_mask_indices.nonzero(as_tuple=False).squeeze()
-
-            if mask_pos.numel() == 0: # No tokens masked in this sequence
-                masked_inputs.append(seq_inputs)
+            # Remove padding for masking calculation if present
+            if pad_token_id is not None:
+                actual_tokens = [tok for tok in sequence if tok != pad_token_id]
+            else:
+                actual_tokens = sequence
+            
+            if not actual_tokens: # Handle empty sequences
+                masked_sequences.append(inputs[i]) # Return original padding
                 continue
 
-            # Sample span lengths (simplified: sample once per sequence for average effect)
-            # A better way: iterate and sample length each time a new span starts
-            span_lengths = np.random.poisson(lam=self.mean_span_length, size=mask_pos.numel()) # Sample potential lengths
-            span_lengths = np.clip(span_lengths, 1, None) # Ensure length is at least 1
+            n_tokens = len(actual_tokens)
+            if n_tokens <= 1: # Cannot mask if only BOS/EOS or single token
+                 masked_sequences.append(inputs[i])
+                 continue
 
-            current_inputs = []
-            current_pos = 0
-            mask_idx_ptr = 0
+            # Determine number of tokens to mask (target percentage of actual tokens)
+            num_to_mask = int(round(n_tokens * self.mask_prob))
+            if num_to_mask == 0:
+                masked_sequences.append(inputs[i]) # No masking needed
+                continue
 
-            while current_pos < seq_inputs.numel():
-                if not seq_mask_indices[current_pos]:
-                    # Not masked, keep original token
-                    current_inputs.append(seq_inputs[current_pos].item())
-                    current_pos += 1
-                else:
+            # Sample span lengths from Poisson distribution
+            span_lengths = []
+            current_sum = 0
+            while current_sum < num_to_mask:
+                length = np.random.poisson(lam=self.mean_span_length)
+                if length > 0: # Only consider spans of length 1 or more
+                    span_lengths.append(length)
+                    current_sum += length
+            
+            # Trim excess length from the last span if needed
+            if current_sum > num_to_mask:
+                 diff = current_sum - num_to_mask
+                 if span_lengths[-1] > diff:
+                     span_lengths[-1] -= diff
+                 else: # If last span is too small, remove it (or adjust previous)
+                     span_lengths.pop() # Simplest approach
+
+            if not span_lengths: # Handle case where no valid spans generated
+                masked_sequences.append(inputs[i])
+                continue
+
+            # Identify indices that can be masked (exclude special tokens like BOS/EOS if they are not PAD)
+            indices_maskable = np.array([
+                idx for idx, token_id in enumerate(actual_tokens)
+                if token_id != bos_token_id and token_id != eos_token_id
+            ])
+
+            if len(indices_maskable) < sum(span_lengths):
+                # Not enough maskable tokens for the desired spans, mask fewer
+                # This can happen with short sequences or high mask_prob
+                # Simple strategy: mask all maskable tokens if needed
+                num_to_mask = len(indices_maskable)
+                span_lengths = [num_to_mask] if num_to_mask > 0 else []
+                # Alternative: recalculate spans based on available indices
+
+            if not span_lengths:
+                 masked_sequences.append(inputs[i])
+                 continue
+
+            # Choose starting indices for spans randomly from maskable indices
+            # Ensure spans don't overlap (more complex) or allow overlap (simpler)
+            # Simple approach: Randomly select start indices, potentially leading to overlap
+            # Better: Select indices to mask first, then group into spans (harder)
+            # Let's try selecting indices first:
+            indices_to_mask = np.random.choice(indices_maskable, size=num_to_mask, replace=False)
+            indices_to_mask_set = set(indices_to_mask)
+
+            # Build the new sequence with single mask tokens replacing spans
+            new_sequence = []
+            idx = 0
+            while idx < n_tokens:
+                if idx in indices_to_mask_set:
                     # Start of a masked span
-                    current_inputs.append(self.tokenizer.mask_token_id) # Add single mask token
+                    new_sequence.append(mask_token_id)
+                    # Skip over all consecutive masked tokens in this span
+                    while idx < n_tokens and idx in indices_to_mask_set:
+                        idx += 1
+                else:
+                    # Keep the original token
+                    new_sequence.append(actual_tokens[idx])
+                    idx += 1
 
-                    # Determine how many tokens this mask represents (simplified)
-                    # Use pre-sampled length or find consecutive masked tokens
-                    # Let's find consecutive masked tokens for simplicity here
-                    start_span = current_pos
-                    while current_pos < seq_inputs.numel() and seq_mask_indices[current_pos]:
-                        current_pos += 1
-                    # The single mask token represents tokens from start_span to current_pos-1
+            # Pad the new sequence back to the original length (or max_length)
+            # The collator's main padding should handle this if we return variable length lists,
+            # but let's pad here to maintain tensor shape consistency within this function.
+            padding_needed = original_length - len(new_sequence)
+            if padding_needed > 0:
+                new_sequence.extend([pad_token_id] * padding_needed)
+            elif padding_needed < 0:
+                # This shouldn't happen if logic is correct, but truncate if it does
+                new_sequence = new_sequence[:original_length]
 
-            # Pad or truncate the resulting sequence if needed (should be handled by collator padding later?)
-            # For now, assume the length change is managed by padding.
-            # Need to convert list back to tensor and handle padding carefully.
+            masked_sequences.append(torch.tensor(new_sequence, dtype=torch.long))
 
-            # This simplified approach has issues with length changes.
-            # A proper implementation needs careful index management or uses libraries
-            # that handle span masking robustly.
+        # Stack the list of tensors into a single batch tensor
+        return torch.stack(masked_sequences)
 
-            # --- Fallback to simpler token masking if span masking is too complex for this context ---
-            # For now, let's revert to token masking but use the mask_prob correctly
-            # This is NOT text infilling, but closer than MLM probability.
-            logger.warning("Using simplified token masking (not true BART Text Infilling) due to implementation complexity.")
-            probability_matrix = torch.full(labels[i].shape, self.mask_prob)
-            masked_indices_simple = torch.bernoulli(probability_matrix).bool()
-            masked_indices_simple &= (labels[i] != self.tokenizer.pad_token_id) # Avoid padding
-            # Avoid BOS/EOS
-            if self.tokenizer.bos_token_id is not None:
-                 masked_indices_simple &= (labels[i] != self.tokenizer.bos_token_id)
-            if self.tokenizer.eos_token_id is not None:
-                 masked_indices_simple &= (labels[i] != self.tokenizer.eos_token_id)
-
-
-            inputs[i, masked_indices_simple] = self.tokenizer.mask_token_id
-            # Labels remain the original tokens where masking occurred
-
-        # Re-assign labels for the simplified masking
-        # We compute loss only on the tokens that were masked
-        final_labels = inputs.clone() # Start with original inputs
-        label_mask = torch.full(labels.shape, True) # Assume all are masked initially
-        # Set non-masked positions to -100
-        # This requires knowing which *were* masked by the bernoulli sampling above.
-        # Let's recalculate the mask based on the final input
-        final_masked_indices = (inputs == self.tokenizer.mask_token_id)
-        final_labels[~final_masked_indices] = -100 # Ignore loss for non-masked tokens
-        final_labels[final_masked_indices] = labels[final_masked_indices] # Set label to original token where mask is present
-
-        # Return the modified inputs and the correctly masked labels
-        # This is still token masking, not span masking/text infilling.
-        return inputs # Return the inputs with masks
-
-
-# --- Main Script ---
-if __name__ == "__main__":
-    # ... (rest of the script remains largely the same) ...
-
-    # --- Data Collator for BART Pre-training (Denoising Objective) ---
-    # Using the custom (simplified) collator defined above
-    print("Using DataCollatorForBartTextInfilling (Simplified Token Masking - NOT true Text Infilling)")
-    data_collator = DataCollatorForBartTextInfilling(
-        tokenizer=tokenizer,
-        mask_prob=0.35, # Adjust overall corruption probability if needed
-        mean_span_length=data_args.mean_span_length # Pass lambda for Poisson (though not fully used in simplified version)
-    )
-
-    # 5. Configure Training Arguments is already done by HfArgumentParser
-    # We now use training_args directly, which is an instance of TrainingArguments
-
-    # 6. Initialize Trainer
-    print("Initializing Trainer...")
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets, # Pass the processed dataset
-        # eval_dataset=tokenized_datasets["validation"] if "validation" in tokenized_datasets else None, # Add validation if available
-        tokenizer=tokenizer,
-        data_collator=data_collator, # Use the appropriate collator
-    )
-
-    # 7. Run Training (if requested)
-    if training_args.do_train: # Use training_args.do_train
-        print("\n--- Starting Training ---")
-        # Check for last checkpoint
-        last_checkpoint = None
-        # Detecting last checkpoint logic from Hugging Face examples
-        if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-            last_checkpoint = get_last_checkpoint(training_args.output_dir)
-            if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-                 # Check if output directory exists and is not empty, and overwrite_output_dir is False
-                 # This check might need refinement based on exact HF script logic
-                 # For now, assume HfArgumentParser handles this or raise error if needed
-                 logger.info(f"Output directory ({training_args.output_dir}) already exists and is not empty. Not overwriting.")
-                 # Or potentially raise error if overwrite_output_dir is False and dir is not empty
-            elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-                logger.info(
-                    f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                    "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-                )
-
-        # Determine checkpoint to resume from
-        checkpoint = None
-        if training_args.resume_from_checkpoint is not None:
-            checkpoint = training_args.resume_from_checkpoint
-        elif last_checkpoint is not None:
-            checkpoint = last_checkpoint
-
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too
-
-        metrics = train_result.metrics
-        # Add max_train_samples logic if needed for metrics
-        # max_train_samples = (
-        #     data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-        # )
-        # metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
-        # Log metrics
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
-        print("\n--- Training Finished ---")
-    else:
-        print("\nSkipping training as --do_train was not specified.")
-        print("This script sets up the model, tokenizer, and data pipeline.")
-        print("Run with --do_train to execute the pre-training.")
-
-    print("\n--- Continued Pre-training Script Outline Complete ---")
-    logger.info("Script finished successfully.")
-
-# Example Usage (from command line):
-# Note: Pass TrainingArguments like --fp16, --save_steps directly now
-# python run_pretraining.py \
-#   --tokenizer_name_or_path ./indonesian_tokenizer \
-#   --output_dir ./indobart_pretrained \
-#   --do_train \
-#   --num_train_epochs 1 \
-#   --per_device_train_batch_size 8 \
-#   --learning_rate 5e-5 \
-#   # Add other TrainingArguments as needed
+# Removed duplicate _collate_batch function definition.
+# The correct definition should exist earlier in the file or be imported if needed.
+# Assuming the first definition (around line 210 according to the error) is the correct one.

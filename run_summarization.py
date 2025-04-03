@@ -33,7 +33,7 @@ parser = argparse.ArgumentParser(description="Fine-tune IndoBART for Summarizati
 # Model/Tokenizer Args
 parser.add_argument("--model_name_or_path", type=str, required=True, help="Path to the pre-trained IndoBART model directory")
 # Tokenizer path usually same as model path after saving
-# parser.add_argument("--tokenizer_name_or_path", type=str, help="Path to the tokenizer directory (if different from model)")
+parser.add_argument("--tokenizer_name_or_path", type=str, help="Path to the tokenizer directory (if different from model)")
 
 # Data Args
 parser.add_argument("--dataset_name", type=str, required=True, help="Hugging Face dataset name or path to local dataset (e.g., 'indosum', 'lipartan6')")
