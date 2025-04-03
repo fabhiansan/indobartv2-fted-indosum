@@ -19,13 +19,14 @@ from transformers import (
     AutoTokenizer,
     BartForConditionalGeneration, # BART is often used for Seq2Seq, but pre-training uses MaskedLM concepts
     # DataCollatorForLanguageModeling, # Removed placeholder
-    DataCollatorMixin, # Added for custom collator
+    # DataCollatorMixin, # Moved import below
     HfArgumentParser,
     PreTrainedTokenizerBase, # Added for collator typing
     Trainer,
     TrainingArguments,
     set_seed,
 )
+from transformers.data.data_collator import DataCollatorMixin # Correct import path
 from transformers.trainer_utils import get_last_checkpoint
 
 # --- Setup Logging ---
@@ -43,12 +44,14 @@ class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
     """
+    # Required field (no default) comes first
+    tokenizer_name_or_path: str = field(
+        metadata={"help": "Path to the custom trained tokenizer directory"}
+    )
+    # Fields with defaults follow
     base_model_name_or_path: str = field(
         default="facebook/bart-base",
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
-    )
-    tokenizer_name_or_path: str = field(
-        metadata={"help": "Path to the custom trained tokenizer directory"}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
