@@ -16,7 +16,8 @@ from transformers import (
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
     AutoModelForMaskedLM,
-    AutoTokenizer,
+    AutoTokenizer, # Keep for potential fallback, but prefer specific class
+    BartTokenizerFast, # Added specific class
     BartForConditionalGeneration, # BART is often used for Seq2Seq, but pre-training uses MaskedLM concepts
     # DataCollatorForLanguageModeling, # Removed placeholder
     # DataCollatorMixin, # Moved import below
@@ -130,12 +131,13 @@ if __name__ == "__main__":
     # 1. Load Custom Tokenizer
     print(f"Loading custom tokenizer from: {model_args.tokenizer_name_or_path}")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
+        # Explicitly load using BartTokenizerFast, which should handle vocab.json/merges.txt
+        tokenizer = BartTokenizerFast.from_pretrained(
             model_args.tokenizer_name_or_path,
             cache_dir=model_args.cache_dir,
-            use_fast=model_args.use_fast_tokenizer,
+            # use_fast=model_args.use_fast_tokenizer, # Not needed when using specific Fast class
         )
-        print(f"Tokenizer loaded. Vocab size: {tokenizer.vocab_size}")
+        print(f"Tokenizer loaded using BartTokenizerFast. Vocab size: {tokenizer.vocab_size}")
     except Exception as e:
         logger.error(f"Error loading tokenizer: {e}")
         exit(1)
