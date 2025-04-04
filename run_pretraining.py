@@ -228,6 +228,11 @@ if __name__ == "__main__":
     else:
         print("Model vocab size already matches tokenizer vocab size. No resizing needed.")
 
+    # Explicitly tie weights after resizing (important if LM head is tied to input embeddings)
+    print("Tying model weights...")
+    model.tie_weights()
+    print("Model weights tied.")
+
 
     # 4. Load and Prepare Dataset
     print(f"Loading dataset: {data_args.dataset_name}, Language: {data_args.dataset_lang}")
