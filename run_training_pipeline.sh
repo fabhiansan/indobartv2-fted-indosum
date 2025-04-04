@@ -85,7 +85,7 @@ COMMAND="python run_pretraining.py \
   --max_seq_length 512 \
   # --mlm_probability is not used with the custom BART collator
   --mean_span_length 3 \ # Corresponds to lambda=3 in BART paper (default in script)
-  --fp16 True \
+  --fp16 False \ # Temporarily disable FP16 for debugging CUDA error
   --save_steps 10000 \
   --logging_steps 500 \
   --save_strategy epoch \
