@@ -214,6 +214,9 @@ if __name__ == "__main__":
     if original_vocab_size != len(tokenizer):
         print(f"Resizing token embeddings from {original_vocab_size} to {len(tokenizer)}")
         model.resize_token_embeddings(len(tokenizer))
+        # Force update the config vocab size AFTER resizing to ensure consistency
+        model.config.vocab_size = len(tokenizer)
+        print(f"Force updated model.config.vocab_size to: {model.config.vocab_size}")
         # Verify after resizing
         new_vocab_size = model.get_input_embeddings().weight.shape[0]
         print(f"New model vocab size after resizing: {new_vocab_size}")
@@ -380,18 +383,23 @@ if __name__ == "__main__":
             # Let's assume tokenizer.pad handled it initially.
 
             # --- Add validation check ---
-            max_id_in_batch = torch.max(batch["input_ids"])
-            if max_id_in_batch >= self.tokenizer.vocab_size:
+            # Use len(self.tokenizer) which is standard, fixes Pylint error
+            vocab_size = len(self.tokenizer)
+            # Check if *any* input ID is out of bounds
+            if (batch["input_ids"] >= vocab_size).any():
+                invalid_ids = batch["input_ids"][batch["input_ids"] >= vocab_size]
                 logger.error(
-                    f"DataCollator Error: Found input_id {max_id_in_batch.item()} in batch, "
-                    f"which is >= vocab_size {self.tokenizer.vocab_size}. "
+                    f"DataCollator Error: Found input_id(s) >= vocab_size ({vocab_size}). "
+                    f"Invalid IDs found: {invalid_ids.tolist()}. " # Log the specific invalid IDs
                     f"This indicates an issue in the masking or tokenization process."
                 )
                 # Optionally log more details about the batch if needed for debugging
-                # logger.error(f"Problematic input_ids sample: {batch['input_ids'][0]}")
+                # problem_indices = torch.where(batch["input_ids"] >= vocab_size)
+                # logger.error(f"Problematic batch indices: {problem_indices}")
+                # logger.error(f"Problematic input_ids sample: {batch['input_ids'][problem_indices[0][0]]}") # Log one problematic sequence
                 raise ValueError(
-                    f"Invalid token ID {max_id_in_batch.item()} detected in collator output "
-                    f"(vocab size: {self.tokenizer.vocab_size})."
+                    f"Invalid token ID(s) detected in collator output (>= vocab size: {vocab_size}). " # Use vocab_size variable
+                    f"See logs for details."
                 )
             # --- End validation check ---
 
@@ -523,6 +531,28 @@ if __name__ == "__main__":
         pad_to_multiple_of=8 if training_args.fp16 else None, # Pad for FP16 efficiency
     )
     print("Data collator initialized.")
+
+    # --- Verify Model Config Vocab Size Before Trainer ---
+    print("Verifying model config vocab size before initializing Trainer...")
+    if model.config.vocab_size != len(tokenizer):
+        logger.warning(
+            f"Model config vocab size ({model.config.vocab_size}) does not match tokenizer length ({len(tokenizer)})! "
+            f"Attempting to force update model.config.vocab_size."
+        )
+        model.config.vocab_size = len(tokenizer)
+        # Double-check embedding layer size again just in case
+        if model.get_input_embeddings().weight.shape[0] != len(tokenizer):
+             logger.error(
+                 f"FATAL: Embedding layer size ({model.get_input_embeddings().weight.shape[0]}) "
+                 f"still doesn't match tokenizer length ({len(tokenizer)}) even after config update attempt."
+             )
+             exit(1)
+        else:
+             logger.info(f"Successfully updated model.config.vocab_size to {model.config.vocab_size}")
+    else:
+        print(f"Model config vocab size ({model.config.vocab_size}) matches tokenizer length ({len(tokenizer)}).")
+    # --- End Verification ---
+
 
     # --- Initialize Trainer ---
     print("Initializing Trainer...")
