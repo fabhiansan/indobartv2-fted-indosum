@@ -634,31 +634,3 @@ if __name__ == "__main__":
     #     trainer.save_metrics("eval", metrics)
 
     print("\n--- Pre-training Script Completed ---")
-
-</final_file_content>
-
-IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
-
-<environment_details>
-# VSCode Visible Files
-run_pretraining.py
-
-# VSCode Open Tabs
-indobart.md
-bartscore.md
-indobart_pretraining_plan.md
-output.log
-test_pretrained_bart.py
-train_tokenizer.py
-run_training_pipeline.sh
-run_pretraining.py
-run_summarization.py
-test.md
-../../Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json
-
-# Current Time
-4/4/2025, 5:20:00 PM (Asia/Jakarta, UTC+7:00)
-
-# Current Mode
-ACT MODE
-</environment_details>
