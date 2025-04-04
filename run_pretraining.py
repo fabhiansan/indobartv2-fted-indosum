@@ -379,7 +379,23 @@ if __name__ == "__main__":
             # If padding was dynamic, it needs recalculation based on `masked_inputs`.
             # Let's assume tokenizer.pad handled it initially.
 
-            return batch # Ensure this is indented to match the start of the torch_call method body
+            # --- Add validation check ---
+            max_id_in_batch = torch.max(batch["input_ids"])
+            if max_id_in_batch >= self.tokenizer.vocab_size:
+                logger.error(
+                    f"DataCollator Error: Found input_id {max_id_in_batch.item()} in batch, "
+                    f"which is >= vocab_size {self.tokenizer.vocab_size}. "
+                    f"This indicates an issue in the masking or tokenization process."
+                )
+                # Optionally log more details about the batch if needed for debugging
+                # logger.error(f"Problematic input_ids sample: {batch['input_ids'][0]}")
+                raise ValueError(
+                    f"Invalid token ID {max_id_in_batch.item()} detected in collator output "
+                    f"(vocab size: {self.tokenizer.vocab_size})."
+                )
+            # --- End validation check ---
+
+            return batch
 
 
         def torch_mask_text_infilling(self, inputs: torch.Tensor, special_tokens_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -574,4 +590,3 @@ if __name__ == "__main__":
     #     trainer.save_metrics("eval", metrics)
 
     print("\n--- Pre-training Script Completed ---")
-
