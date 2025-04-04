@@ -233,6 +233,22 @@ if __name__ == "__main__":
     model.tie_weights()
     print("Model weights tied.")
 
+    # --- Verify critical token IDs ---
+    print("Verifying critical token IDs...")
+    vocab_size = len(tokenizer)
+    if model.config.decoder_start_token_id is None:
+         logger.warning("Model config does not have decoder_start_token_id set.")
+    elif model.config.decoder_start_token_id >= vocab_size:
+         logger.error(
+             f"FATAL: model.config.decoder_start_token_id ({model.config.decoder_start_token_id}) "
+             f"is out of bounds for tokenizer vocab size ({vocab_size})."
+         )
+         exit(1)
+    else:
+        print(f"model.config.decoder_start_token_id ({model.config.decoder_start_token_id}) is valid.")
+    # You could add similar checks for bos_token_id, eos_token_id, pad_token_id if needed
+    # --- End Verification ---
+
 
     # 4. Load and Prepare Dataset
     print(f"Loading dataset: {data_args.dataset_name}, Language: {data_args.dataset_lang}")
@@ -387,19 +403,16 @@ if __name__ == "__main__":
             # If padding was dynamic, it needs recalculation based on `masked_inputs`.
             # Let's assume tokenizer.pad handled it initially.
 
-            # --- Add Clamping as a safety net ---
-            vocab_size = len(self.tokenizer)
-            # Clamp values to be within the valid range [0, vocab_size - 1]
-            # This prevents indices >= vocab_size from causing the CUDA error,
-            # even if the masking logic somehow produced one.
-            batch["input_ids"] = torch.clamp(batch["input_ids"], 0, vocab_size - 1)
+            # --- Clamping removed for debugging ---
+            # vocab_size = len(self.tokenizer)
+            # batch["input_ids"] = torch.clamp(batch["input_ids"], 0, vocab_size - 1)
             # --- End Clamping ---
 
 
             # --- Add validation check ---
-            # Use len(self.tokenizer) which is standard, fixes Pylint error
-            # vocab_size = len(self.tokenizer) # Already defined above
-            # Check if *any* input ID is out of bounds
+            # Use len(self.tokenizer) which is standard
+            vocab_size = len(self.tokenizer)
+            # Check input_ids
             if (batch["input_ids"] >= vocab_size).any():
                 invalid_ids = batch["input_ids"][batch["input_ids"] >= vocab_size]
                 logger.error(
@@ -412,9 +425,23 @@ if __name__ == "__main__":
                 # logger.error(f"Problematic batch indices: {problem_indices}")
                 # logger.error(f"Problematic input_ids sample: {batch['input_ids'][problem_indices[0][0]]}") # Log one problematic sequence
                 raise ValueError(
-                    f"Invalid token ID(s) detected in collator output (>= vocab size: {vocab_size}). " # Use vocab_size variable
+                    f"Invalid token ID(s) detected in collator output (>= vocab size: {vocab_size}). "
                     f"See logs for details."
                 )
+            # Check labels (just in case, though error seems encoder-related)
+            if "labels" in batch and (batch["labels"] >= vocab_size).any():
+                 # Ignore -100 labels
+                 valid_labels_mask = batch["labels"] != -100
+                 if (batch["labels"][valid_labels_mask] >= vocab_size).any():
+                    invalid_label_ids = batch["labels"][valid_labels_mask & (batch["labels"] >= vocab_size)]
+                    logger.error(
+                        f"DataCollator Error: Found label ID(s) >= vocab_size ({vocab_size}). "
+                        f"Invalid IDs found: {invalid_label_ids.tolist()}. "
+                    )
+                    raise ValueError(
+                        f"Invalid label ID(s) detected in collator output (>= vocab size: {vocab_size}). "
+                        f"See logs for details."
+                    )
             # --- End validation check ---
 
             return batch
