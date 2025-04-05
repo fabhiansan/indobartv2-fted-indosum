@@ -22,12 +22,8 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 
 # Setup logging
+# We will set up the file handler later in main() once training_args are parsed
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 
 
 @dataclass
@@ -207,13 +203,35 @@ def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    # --- Setup ---
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        level=logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN,
-    )
-    logger.setLevel(logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN)
+    # --- Setup Logging ---
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    # datasets.utils.logging.set_verbosity(log_level) # Uncomment if datasets logging is too verbose
+    # transformers.utils.logging.set_verbosity(log_level) # Uncomment if transformers logging is too verbose
+    # transformers.utils.logging.enable_default_handler()
+    # transformers.utils.logging.enable_explicit_format()
+
+    # Log to console
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    console_handler.setFormatter(formatter)
+    # Remove existing handlers if any to avoid duplicate console logs
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    logger.addHandler(console_handler)
+
+    # Log to file (only on main process)
+    if training_args.local_rank in [-1, 0]:
+        log_file_path = os.path.join(training_args.output_dir, "training_log.log")
+        os.makedirs(training_args.output_dir, exist_ok=True)
+        file_handler = logging.FileHandler(log_file_path)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info(f"Logging to file: {log_file_path}")
+
+    # Log on each process the small summary:
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
         + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
