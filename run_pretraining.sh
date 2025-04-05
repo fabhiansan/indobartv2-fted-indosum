@@ -83,6 +83,7 @@ accelerate launch run_pretraining.py \
     --preprocessing_num_workers $(nproc) \
     --overwrite_cache false \
     --max_seq_length 512 \
+    --overwrite_output_dir \
     # Add --report_to tensorboard (or wandb) if needed for logging
 
 # Check exit status
