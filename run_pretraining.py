@@ -128,8 +128,14 @@ class DataCollatorForBartDenoising:
             while n_masked < n_masks_to_add:
                 # Sample span length from Poisson distribution
                 span_len = np.random.choice(np.arange(1, len(self.poisson_distribution) + 1), p=self.poisson_distribution)
-                # Find a random start index for the span
-                anchor = np.random.randint(0, original_len - span_len + 1)
+
+                # Ensure span_len is not greater than original_len, otherwise skip this attempt
+                if span_len > original_len:
+                    continue # Cannot mask a span longer than the sequence itself
+
+                # Find a random start index for the span, ensuring the upper bound for randint is at least 1
+                high_bound = original_len - span_len + 1
+                anchor = np.random.randint(0, max(1, high_bound)) # Use max(1, high_bound)
 
                 # Ensure we don't overlap with already masked spans or mask special tokens
                 # This simple check might not be perfect for complex overlaps
