@@ -80,7 +80,7 @@ accelerate launch run_pretraining.py \
     --save_steps ${SAVE_STEPS} \
     --save_total_limit ${SAVE_TOTAL_LIMIT} \
     --fp16 \
-    --preprocessing_num_workers $(nproc) \
+    --preprocessing_num_workers 4 \
     --overwrite_cache false \
     --max_seq_length 512 \
     --overwrite_output_dir \
