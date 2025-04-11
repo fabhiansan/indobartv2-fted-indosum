@@ -54,7 +54,7 @@ LOGGING_STRATEGY = "epoch"
 EVALUATION_STRATEGY = "epoch"
 SAVE_STRATEGY = "epoch"
 SAVE_TOTAL_LIMIT = 2 # Keep only the best and the latest checkpoint
-LOAD_BEST_MODEL_AT_END = True
+LOAD_BEST_MODEL_AT_END = False # Temporarily disable to ensure per-epoch eval logs are clearly visible
 METRIC_FOR_BEST_MODEL = "loss" # Use validation loss to determine the best model
 GREATER_IS_BETTER = False # For loss, lower is better
 
