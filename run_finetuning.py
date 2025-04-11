@@ -156,7 +156,7 @@ def main():
     data_collator = DataCollatorForSeq2Seq(
         tokenizer,
         model=model,
-        label_pad_token_id=tokenizer.pad_token_id, # Use pad_token_id for labels padding
+        label_pad_token_id=-100, # Standard practice for ignoring padding in loss calculation
         pad_to_multiple_of=8 if training_args.fp16 else None # Optimize for FP16
     )
 
