@@ -13,18 +13,19 @@ OUTPUT_DIR = "./indobart-finetuned-summarization"
 # The script will handle combining them, but be mindful of potential language mixing effects.
 DATASET_NAMES = {
     "xsum": "xsum", # Standard English summarization dataset
-    # "indosum": "SEACrowd/indosum", # Temporarily disabled due to loading error (NotADirectoryError)
+    "indosum": "SEACrowd/indosum", # Will be loaded from local path below
     "liputan6": "fajrikoto/id_liputan6" # Will be loaded from local path below
 }
-# Specify local path for datasets requiring manual download
+# Specify local paths for datasets requiring manual download or with loading issues
 LOCAL_DATA_PATHS = {
-    "liputan6": "../dataset/sum_liputan6/processed_data/" # Path to the directory containing train/validation/test splits
+    "liputan6": "../dataset/sum_liputan6/processed_data/", # Path to the directory containing train/validation/test splits
+    "indosum": "../dataset/indosum/" # Path to the base directory containing traindataset/devdataset/testdataset
 }
 # Column names expected in the datasets (adjust if necessary after inspection)
 # These might need verification by loading a sample of each dataset.
 DATASET_COLUMNS = {
     "xsum": {"document": "document", "summary": "summary"},
-    # "indosum": {"document": "text", "summary": "summary"}, # Temporarily disabled
+    "indosum": {"document": "text", "summary": "summary"}, # Re-enabled - Assuming these column names
     "liputan6": {"document": "clean_article", "summary": "clean_summary"} # Re-enabled - Assuming these column names
 }
 # Use a subset for faster testing/debugging (set to None to use full datasets)

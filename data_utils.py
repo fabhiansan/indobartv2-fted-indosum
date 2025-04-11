@@ -4,6 +4,7 @@ import logging
 from datasets import load_dataset, concatenate_datasets, DatasetDict
 from transformers import AutoTokenizer
 import finetune_config as cfg
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -89,25 +90,48 @@ def load_and_prepare_datasets(tokenizer):
             local_path = cfg.LOCAL_DATA_PATHS.get(name)
             config_name = 'canonical' if name == 'liputan6' else None # Keep config name logic
 
-            if local_path:
-                logging.info(f"Attempting to load {name} from local path: {local_path} with config: {config_name}")
-                # When loading from data_dir, the 'path' argument is often the script name (like 'id_liputan6')
-                # or can be the path itself if it's a generic script like 'arrow' or 'json'.
-                # Let's try using the original path identifier first.
+            if local_path and name == 'liputan6': # Specific logic for local Liputan6
+                logging.info(f"Attempting to load {name} (Arrow format) from local path: {local_path}")
                 try:
-                    raw_dataset = load_dataset(path, name=config_name, data_dir=local_path, trust_remote_code=True)
-                except Exception as local_load_err:
-                    # If loading with the original path id fails, try loading directly with the local path
-                    # This might work if the data is in a standard format like arrow/json/csv
-                    logging.warning(f"Loading {name} with script '{path}' and data_dir failed: {local_load_err}. Trying to load directly from path...")
-                    try:
-                         # Attempt loading directly, assuming standard format (e.g., arrow files in train/validation/test folders)
-                         raw_dataset = load_dataset(local_path, name=config_name, trust_remote_code=True)
-                    except Exception as direct_load_err:
-                         logging.error(f"Failed to load {name} from local path {local_path} both ways.", exc_info=True)
-                         raise direct_load_err # Re-raise the error if both attempts fail
+                    # Define data files assuming train/validation/test subdirs
+                    data_files = {
+                        "train": os.path.join(local_path, "train/*.arrow"),
+                        "validation": os.path.join(local_path, "validation/*.arrow"),
+                        "test": os.path.join(local_path, "test/*.arrow")
+                    }
+                    # Basic check - adjust if needed based on actual file structure/names
+                    import glob
+                    if not glob.glob(data_files["train"]):
+                         raise FileNotFoundError(f"No train arrow files found in {os.path.join(local_path, 'train')}")
+
+                    raw_dataset = load_dataset("arrow", data_files=data_files)
+                    logging.info(f"Successfully loaded {name} from local Arrow files.")
+                except Exception as arrow_load_err:
+                    logging.error(f"Failed to load {name} from local Arrow files at {local_path}.", exc_info=True)
+                    raise arrow_load_err
+            elif local_path and name == 'indosum': # Specific logic for local IndoSUM
+                 logging.info(f"Attempting to load {name} (Arrow format) from local path: {local_path}")
+                 try:
+                    # Define data files using user-provided subdir names
+                    data_files = {
+                        "train": os.path.join(local_path, "traindataset/*.arrow"),
+                        "validation": os.path.join(local_path, "devdataset/*.arrow"), # Assuming devdataset is validation
+                        "test": os.path.join(local_path, "testdataset/*.arrow")
+                    }
+                    import glob
+                    if not glob.glob(data_files["train"]):
+                         raise FileNotFoundError(f"No train arrow files found in {os.path.join(local_path, 'traindataset')}")
+
+                    raw_dataset = load_dataset("arrow", data_files=data_files)
+                    logging.info(f"Successfully loaded {name} from local Arrow files.")
+                 except Exception as arrow_load_err:
+                    logging.error(f"Failed to load {name} from local Arrow files at {local_path}.", exc_info=True)
+                    raise arrow_load_err
+            elif local_path: # Handle other potential local datasets generically
+                 logging.warning(f"Generic local path loading not fully implemented for {name}. Trying standard load from path.")
+                 raw_dataset = load_dataset(local_path, trust_remote_code=True)
             else:
-                # Load from Hugging Face Hub if no local path specified
+                # Load from Hugging Face Hub if no local path specified or not liputan6
                 logging.info(f"Attempting to load {name} ({path}) from Hub with trust_remote_code=True and config: {config_name}")
                 raw_dataset = load_dataset(path, name=config_name, trust_remote_code=True)
             logging.info(f"Raw dataset '{name}' loaded. Features: {raw_dataset}")
