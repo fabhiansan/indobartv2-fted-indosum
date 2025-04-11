@@ -85,9 +85,9 @@ def load_and_prepare_datasets(tokenizer):
     for name, path in cfg.DATASET_NAMES.items():
         logging.info(f"Loading dataset: {name} ({path})")
         try:
-            # SEACrowd datasets might require trust_remote_code
-            trust_code = "SEACrowd" in path
-            raw_dataset = load_dataset(path, trust_remote_code=trust_code)
+            # Always trust remote code for these datasets as they might have custom scripts
+            logging.info(f"Attempting to load {path} with trust_remote_code=True")
+            raw_dataset = load_dataset(path, trust_remote_code=True)
             logging.info(f"Raw dataset '{name}' loaded. Features: {raw_dataset}")
 
             current_split_map = dataset_split_mappings.get(name, split_mapping)
@@ -131,9 +131,14 @@ def load_and_prepare_datasets(tokenizer):
                 logging.info(f"Finished processing {split_type} split for {name}.")
 
         except Exception as e:
-            logging.error(f"Failed to load or process dataset {name}: {e}", exc_info=True)
-            # Decide if you want to continue without this dataset or raise error
-            # raise e # Uncomment to stop execution if a dataset fails
+            # Special handling for potential IndoSUM generation error
+            if name == "indosum" and isinstance(e, ValueError) and "NotADirectoryError" in str(e):
+                 logging.warning(f"Skipping dataset '{name}' due to a potential generation/caching issue: {e}", exc_info=False)
+            # Handle general loading/processing errors
+            else:
+                logging.error(f"Failed to load or process dataset {name}: {e}", exc_info=True)
+            # Continue to the next dataset instead of stopping execution
+            continue # Skip the rest of the loop for this failed dataset
 
     # Combine datasets for each split
     final_datasets = DatasetDict()
