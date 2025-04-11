@@ -7,9 +7,8 @@ import finetune_config as cfg
 import pyarrow.feather as feather
 import pyarrow as pa
 import pandas as pd
-import glob
 import os
-import os
+import glob # Ensure glob is imported at the top level
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -105,7 +104,7 @@ def load_and_prepare_datasets(tokenizer):
                         "test": os.path.join(local_path, "test/*.arrow")
                     }
                     # Basic check - adjust if needed based on actual file structure/names
-                    import glob
+                    # import glob # Removed from here, moved to top
                     if not glob.glob(data_files["train"]):
                          raise FileNotFoundError(f"No train arrow files found in {os.path.join(local_path, 'train')}")
 
