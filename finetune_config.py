@@ -25,8 +25,8 @@ LOCAL_DATA_PATHS = {
 # These might need verification by loading a sample of each dataset.
 DATASET_COLUMNS = {
     "xsum": {"document": "document", "summary": "summary"},
-    "indosum": {"document": "text", "summary": "summary"}, # Re-enabled - Assuming these column names
-    "liputan6": {"document": "clean_article", "summary": "clean_summary"} # Re-enabled - Assuming these column names
+    "indosum": {"document": "article", "summary": "summary"}, # Corrected column names based on error log
+    "liputan6": {"document": "text", "summary": "summary"} # Corrected column names based on error log
 }
 # Use a subset for faster testing/debugging (set to None to use full datasets)
 MAX_TRAIN_SAMPLES = 1000 # Example: Use only 1000 training samples per dataset
