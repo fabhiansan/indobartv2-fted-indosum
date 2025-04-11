@@ -45,8 +45,8 @@ def preprocess_function(examples, tokenizer):
     model_inputs = tokenizer(
         inputs,
         max_length=cfg.MAX_INPUT_LENGTH,
-        truncation=True,
-        padding="max_length" # Pad later with collator if preferred
+        truncation=True
+        # Padding will be handled dynamically by the DataCollatorForSeq2Seq
     )
 
     # Setup the tokenizer for targets
@@ -54,8 +54,8 @@ def preprocess_function(examples, tokenizer):
         labels = tokenizer(
             examples["target_text"],
             max_length=cfg.MAX_TARGET_LENGTH,
-            truncation=True,
-            padding="max_length" # Pad later with collator if preferred
+            truncation=True
+            # Padding will be handled dynamically by the DataCollatorForSeq2Seq
         )
 
     model_inputs["labels"] = labels["input_ids"]
@@ -87,7 +87,9 @@ def load_and_prepare_datasets(tokenizer):
         try:
             # Always trust remote code for these datasets as they might have custom scripts
             logging.info(f"Attempting to load {path} with trust_remote_code=True")
-            raw_dataset = load_dataset(path, trust_remote_code=True)
+            # Add config name specifically for liputan6 dataset
+            config_name = 'canonical' if name == 'liputan6' else None
+            raw_dataset = load_dataset(path, name=config_name, trust_remote_code=True)
             logging.info(f"Raw dataset '{name}' loaded. Features: {raw_dataset}")
 
             current_split_map = dataset_split_mappings.get(name, split_mapping)
