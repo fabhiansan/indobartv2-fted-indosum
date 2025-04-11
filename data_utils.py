@@ -85,11 +85,31 @@ def load_and_prepare_datasets(tokenizer):
     for name, path in cfg.DATASET_NAMES.items():
         logging.info(f"Loading dataset: {name} ({path})")
         try:
-            # Always trust remote code for these datasets as they might have custom scripts
-            logging.info(f"Attempting to load {path} with trust_remote_code=True")
-            # Add config name specifically for liputan6 dataset
-            config_name = 'canonical' if name == 'liputan6' else None
-            raw_dataset = load_dataset(path, name=config_name, trust_remote_code=True)
+            # Check if a local path is specified for this dataset
+            local_path = cfg.LOCAL_DATA_PATHS.get(name)
+            config_name = 'canonical' if name == 'liputan6' else None # Keep config name logic
+
+            if local_path:
+                logging.info(f"Attempting to load {name} from local path: {local_path} with config: {config_name}")
+                # When loading from data_dir, the 'path' argument is often the script name (like 'id_liputan6')
+                # or can be the path itself if it's a generic script like 'arrow' or 'json'.
+                # Let's try using the original path identifier first.
+                try:
+                    raw_dataset = load_dataset(path, name=config_name, data_dir=local_path, trust_remote_code=True)
+                except Exception as local_load_err:
+                    # If loading with the original path id fails, try loading directly with the local path
+                    # This might work if the data is in a standard format like arrow/json/csv
+                    logging.warning(f"Loading {name} with script '{path}' and data_dir failed: {local_load_err}. Trying to load directly from path...")
+                    try:
+                         # Attempt loading directly, assuming standard format (e.g., arrow files in train/validation/test folders)
+                         raw_dataset = load_dataset(local_path, name=config_name, trust_remote_code=True)
+                    except Exception as direct_load_err:
+                         logging.error(f"Failed to load {name} from local path {local_path} both ways.", exc_info=True)
+                         raise direct_load_err # Re-raise the error if both attempts fail
+            else:
+                # Load from Hugging Face Hub if no local path specified
+                logging.info(f"Attempting to load {name} ({path}) from Hub with trust_remote_code=True and config: {config_name}")
+                raw_dataset = load_dataset(path, name=config_name, trust_remote_code=True)
             logging.info(f"Raw dataset '{name}' loaded. Features: {raw_dataset}")
 
             current_split_map = dataset_split_mappings.get(name, split_mapping)
