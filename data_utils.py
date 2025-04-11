@@ -1,9 +1,14 @@
 # data_utils.py
 
 import logging
-from datasets import load_dataset, concatenate_datasets, DatasetDict
+from datasets import load_dataset, concatenate_datasets, DatasetDict, Features, Value, Dataset
 from transformers import AutoTokenizer
 import finetune_config as cfg
+import pyarrow.feather as feather
+import pyarrow as pa
+import pandas as pd
+import glob
+import os
 import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -109,24 +114,44 @@ def load_and_prepare_datasets(tokenizer):
                 except Exception as arrow_load_err:
                     logging.error(f"Failed to load {name} from local Arrow files at {local_path}.", exc_info=True)
                     raise arrow_load_err
-            elif local_path and name == 'indosum': # Specific logic for local IndoSUM
-                 logging.info(f"Attempting to load {name} (Arrow format) from local path: {local_path}")
-                 try:
-                    # Define data files using user-provided subdir names
-                    data_files = {
-                        "train": os.path.join(local_path, "traindataset/*.arrow"),
-                        "validation": os.path.join(local_path, "devdataset/*.arrow"), # Assuming devdataset is validation
-                        "test": os.path.join(local_path, "testdataset/*.arrow")
-                    }
-                    import glob
-                    if not glob.glob(data_files["train"]):
-                         raise FileNotFoundError(f"No train arrow files found in {os.path.join(local_path, 'traindataset')}")
+            elif local_path and name == 'indosum': # Specific logic for local IndoSUM using pyarrow
+                logging.info(f"Attempting to load {name} (Arrow format) manually from local path: {local_path}")
+                try:
+                    split_datasets = {}
+                    # Define expected features based on config (corrected column names)
+                    expected_features = Features({
+                        cfg.DATASET_COLUMNS['indosum']['document']: Value('string'),
+                        cfg.DATASET_COLUMNS['indosum']['summary']: Value('string')
+                    })
 
-                    raw_dataset = load_dataset("arrow", data_files=data_files)
-                    logging.info(f"Successfully loaded {name} from local Arrow files.")
-                 except Exception as arrow_load_err:
-                    logging.error(f"Failed to load {name} from local Arrow files at {local_path}.", exc_info=True)
-                    raise arrow_load_err
+                    for split_name_config, subdir_name in [("train", "traindataset"), ("validation", "devdataset"), ("test", "testdataset")]:
+                        split_path_pattern = os.path.join(local_path, subdir_name, "*.arrow")
+                        arrow_files = glob.glob(split_path_pattern)
+                        if not arrow_files:
+                            logging.warning(f"No arrow files found for split '{split_name_config}' in {os.path.join(local_path, subdir_name)}. Skipping this split for IndoSUM.")
+                            continue
+
+                        logging.info(f"Loading {len(arrow_files)} arrow file(s) for IndoSUM split '{split_name_config}' from {os.path.join(local_path, subdir_name)}")
+                        # Load and concatenate tables if multiple files exist for a split
+                        tables = [feather.read_table(f) for f in arrow_files]
+                        pa_table = pa.concat_tables(tables) if tables else None
+
+                        if pa_table:
+                            # Create dataset directly from pyarrow table with defined features
+                            split_datasets[split_name_config] = Dataset.from_arrow(pa_table, features=expected_features)
+                        else:
+                             logging.warning(f"No data loaded for IndoSUM split '{split_name_config}'.")
+
+
+                    if not split_datasets:
+                         raise ValueError("No splits could be loaded for local IndoSUM dataset.")
+
+                    raw_dataset = DatasetDict(split_datasets)
+                    logging.info(f"Successfully loaded {name} from local Arrow files using pyarrow.")
+
+                except Exception as manual_arrow_load_err:
+                    logging.error(f"Failed to load {name} manually from local Arrow files at {local_path}.", exc_info=True)
+                    raise manual_arrow_load_err
             elif local_path: # Handle other potential local datasets generically
                  logging.warning(f"Generic local path loading not fully implemented for {name}. Trying standard load from path.")
                  raw_dataset = load_dataset(local_path, trust_remote_code=True)
